@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>设置</title>
+    <script type="module" src="/src/settings.ts" defer></script>
+  </head>
+
+  <body class="settings-window">
+    <div class="settings-page">
+      <!-- 顶部图标 Tab 工具栏 -->
+      <nav class="pref-tabs" role="tablist" aria-label="设置分类">
+        <button class="pref-tab active" type="button" role="tab" data-tab="general">
+          <span class="pref-tab-icon">⚙️</span><span class="pref-tab-label">通用</span>
+        </button>
+        <button class="pref-tab" type="button" role="tab" data-tab="appearance">
+          <span class="pref-tab-icon">🎨</span><span class="pref-tab-label">外观</span>
+        </button>
+        <button class="pref-tab" type="button" role="tab" data-tab="storage">
+          <span class="pref-tab-icon">🗄️</span><span class="pref-tab-label">存储</span>
+        </button>
+        <button class="pref-tab" type="button" role="tab" data-tab="pinned">
+          <span class="pref-tab-icon">📌</span><span class="pref-tab-label">固定</span>
+        </button>
+        <button class="pref-tab" type="button" role="tab" data-tab="ignore">
+          <span class="pref-tab-icon">🚫</span><span class="pref-tab-label">忽略</span>
+        </button>
+        <button class="pref-tab" type="button" role="tab" data-tab="advanced">
+          <span class="pref-tab-icon">🛠️</span><span class="pref-tab-label">高级</span>
+        </button>
+      </nav>
+
+      <div class="settings-body">
+        <!-- ===== 通用 ===== -->
+        <section class="tab-panel active" data-tab="general">
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-name">全局快捷键</div>
+              <div class="setting-desc">呼出 / 隐藏窗口</div>
+            </div>
+            <div class="shortcut-box">
+              <span id="shortcut-display" class="shortcut-display">Cmd+Shift+V</span>
+              <button id="shortcut-record" class="mini-btn" type="button">录制</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-name">备用快捷键</div>
+              <div class="setting-desc">第二个呼出 / 隐藏键（可选）</div>
+            </div>
+            <div class="shortcut-box">
+              <span id="shortcut2-display" class="shortcut-display">(未设置)</span>
+              <button id="shortcut2-record" class="mini-btn" type="button">录制</button>
+              <button id="shortcut2-clear" class="mini-btn" type="button">清除</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-name">弹窗位置</div>
+              <div class="setting-desc">唤出窗口时出现的位置</div>
+            </div>
+            <select id="opt-popup-position" class="select">
+              <option value="cursor">光标处</option>
+              <option value="center">屏幕中心</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-name">选中即粘贴</div>
+              <div class="setting-desc">回车后自动粘贴到前台 App（需辅助功能权限）</div>
+            </div>
+            <label class="switch">
+              <input id="opt-paste" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-name">失焦自动隐藏</div>
+              <div class="setting-desc">窗口失去焦点时自动隐藏</div>
+            </div>
+            <label class="switch">
+              <input id="opt-autohide" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-name">开机自启</div>
+              <div class="setting-desc">登录时自动在后台运行</div>
+            </div>
+            <label class="switch">
+              <input id="opt-autostart" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+        </section>
+
+        <!-- ===== 外观 ===== -->
+        <section class="tab-panel" data-tab="appearance">
+          <div class="setting-row column">
+            <div class="setting-label"><div class="setting-name">外观</div></div>
+            <div id="theme-seg" class="segmented" role="radiogroup" aria-label="外观">
+              <button class="seg-btn" type="button" data-theme="system">跟随系统</button>
+              <button class="seg-btn" type="button" data-theme="light">浅色</button>
+              <button class="seg-btn" type="button" data-theme="dark">深色</button>
+            </div>
+          </div>
+          <div class="setting-row column">
+            <div class="setting-label"><div class="setting-name">强调色</div></div>
+            <div id="accent-swatches" class="swatches" role="radiogroup" aria-label="强调色"></div>
+          </div>
+          <div class="setting-row column">
+            <div class="setting-label">
+              <div class="setting-name">窗口高度</div>
+              <div class="setting-desc">主窗口高度（px），宽度固定</div>
+            </div>
+            <div class="range-row">
+              <input id="opt-winheight" class="range" type="range" min="360" max="1400" step="20" value="760" />
+              <input id="opt-winheight-num" class="num-input" type="number" min="360" max="1400" step="20" value="760" />
+            </div>
+          </div>
+          <div class="setting-row column">
+            <div class="setting-label">
+              <div class="setting-name">图片高度</div>
+              <div class="setting-desc">列表中图片缩略图的高度（px）</div>
+            </div>
+            <div class="range-row">
+              <input id="opt-thumbheight" class="range" type="range" min="14" max="48" step="1" value="18" />
+              <input id="opt-thumbheight-num" class="num-input" type="number" min="14" max="48" step="1" value="18" />
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-name">高亮匹配</div>
+              <div class="setting-desc">搜索时命中文本的高亮方式</div>
+            </div>
+            <select id="opt-highlight" class="select">
+              <option value="bold">粗体</option>
+              <option value="underline">下划线</option>
+              <option value="none">无</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-name">在搜索框前显示应用名</div>
+              <div class="setting-desc">顶栏左侧显示「剪切板」</div>
+            </div>
+            <label class="switch">
+              <input id="opt-appname" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-name">显示应用程序图标</div>
+              <div class="setting-desc">列表左侧显示来源 App 图标</div>
+            </div>
+            <label class="switch">
+              <input id="opt-sourceicon" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-name">显示序号</div>
+              <div class="setting-desc">历史右侧显示 ⌘1–⌘9</div>
+            </div>
+            <label class="switch">
+              <input id="opt-numbers" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+        </section>
+
+        <!-- ===== 存储 ===== -->
+        <section class="tab-panel" data-tab="storage">
+          <div class="setting-row column">
+            <div class="setting-label">
+              <div class="setting-name">历史条数上限</div>
+              <div class="setting-desc">仅限制非置顶项（置顶不计入、不淘汰）</div>
+            </div>
+            <div class="range-row">
+              <input id="opt-historysize" class="range" type="range" min="10" max="1000" step="10" value="200" />
+              <input id="opt-historysize-num" class="num-input" type="number" min="10" max="1000" step="10" value="200" />
+            </div>
+          </div>
+          <div class="setting-row column">
+            <div class="setting-label">
+              <div class="setting-name">清空历史</div>
+              <div class="setting-desc">置顶项默认保留</div>
+            </div>
+            <div class="clear-row">
+              <button id="clear-unpinned" class="danger-btn" type="button">仅清空非置顶</button>
+              <button id="clear-all" class="danger-btn danger-strong" type="button">全部清空</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- ===== 固定 ===== -->
+        <section class="tab-panel" data-tab="pinned">
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-name">固定项位置</div>
+              <div class="setting-desc">置顶项在历史列表中的位置</div>
+            </div>
+            <select id="opt-pinned-position" class="select">
+              <option value="top">顶部</option>
+              <option value="bottom">底部</option>
+            </select>
+          </div>
+        </section>
+
+        <!-- ===== 忽略 ===== -->
+        <section class="tab-panel" data-tab="ignore">
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-name">忽略密码内容</div>
+              <div class="setting-desc">不记录密码管理器等敏感剪贴内容</div>
+            </div>
+            <label class="switch">
+              <input id="opt-concealed" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+        </section>
+
+        <!-- ===== 高级 ===== -->
+        <section class="tab-panel" data-tab="advanced">
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-name">恢复默认设置</div>
+              <div class="setting-desc">把所有设置重置为默认值</div>
+            </div>
+            <button id="reset-settings" class="danger-btn" type="button">恢复默认</button>
+          </div>
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-name">关于</div>
+              <div class="setting-desc">剪切板 · 版本 0.1.0</div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </body>
+</html>

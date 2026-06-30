@@ -1,0 +1,43 @@
+[package]
+name = "clipboard-manager"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "clipboard_manager_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "protocol-asset", "macos-private-api"] }
+tauri-plugin-opener = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-autostart = "2"
+clipboard-rs = "0.2"
+enigo = "0.3"
+image = "0.25"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+window-vibrancy = "0.6"
+
+# macOS 原生：读取前台应用名称/图标（来源 App）。objc2 版本须与
+# tauri/wry/window-vibrancy 一致（objc2 0.6 / app-kit 0.3 / foundation 0.3）。
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSData"] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSWorkspace",
+    "NSRunningApplication",
+    "NSImage",
+] }
+

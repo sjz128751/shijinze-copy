@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>剪切板</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <div class="app">
+      <header class="toolbar" data-tauri-drag-region>
+        <span class="app-title" data-tauri-drag-region>剪切板</span>
+        <div class="search-wrap">
+          <svg class="search-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+            <path
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              d="M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zm5.5 12.5L21 21"
+            />
+          </svg>
+          <input
+            id="search"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="搜索剪切板历史..."
+          />
+        </div>
+        <button id="settings-btn" class="icon-btn" type="button" title="设置" aria-label="设置">
+          <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+            <path
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm8.4 3a8.4 8.4 0 0 0-.08-1.1l2.02-1.58-2-3.46-2.38.96a8.4 8.4 0 0 0-1.9-1.1L15.7 1.3h-4l-.36 2.42a8.4 8.4 0 0 0-1.9 1.1l-2.38-.96-2 3.46L7.08 8.9A8.4 8.4 0 0 0 7 10a8.4 8.4 0 0 0 .08 1.1l-2.02 1.58 2 3.46 2.38-.96c.58.46 1.22.83 1.9 1.1l.36 2.42h4l.36-2.42c.68-.27 1.32-.64 1.9-1.1l2.38.96 2-3.46-2.02-1.58c.05-.36.08-.73.08-1.1z"
+            />
+          </svg>
+        </button>
+      </header>
+
+      <div class="body">
+        <main id="list" class="list" aria-live="polite"></main>
+        <aside class="fav-panel">
+          <div class="fav-head"><span class="fav-title">常用</span></div>
+          <div id="fav-tabs" class="fav-tabs"></div>
+          <div id="favorites" class="fav-list"></div>
+        </aside>
+      </div>
+    </div>
+  </body>
+</html>
