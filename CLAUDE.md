@@ -117,7 +117,11 @@ npm run tauri build        # 打正式包（签名后的 .app + .dmg）
 - [x] 自签名证书签名，辅助功能授权可长期生效；未授权时引导打开设置页
 - [x] 快捷键用具体修饰键（`Cmd`/`Ctrl`，不再 `CmdOrCtrl`）+ 老值自动迁移
 - [x] **备用快捷键**（第二个全局键，同样呼出/隐藏，可清除）
+- [x] 弹窗底部预留 Dock/菜单栏边距，不被遮挡
+- [x] App 名（productName）改为 `shijinze-copy`（进程名/活动监视器同步；identifier 不变）
 - [x] 打包签名 dmg（aarch64）
+- [x] **Windows 跨平台支持**：粘贴 Ctrl+V、默认快捷键 Ctrl+Shift+V、亚克力磨砂背景、skipTaskbar；macOS 专属代码已 cfg 隔离
+- [x] **GitHub Actions CI**：`.github/workflows/build-windows.yml`，云端 Windows runner 出 `.msi`/`.exe`
 
 ---
 
@@ -161,4 +165,7 @@ npm run tauri build        # 打正式包（签名后的 .app + .dmg）
 - **最后完成**：新增「备用快捷键」（`shortcut2`）+ 修复「弹窗底部沉到 Dock 后面」（`position_at_cursor` 预留 Dock/菜单栏边距）；并**已打出最新签名 dmg**。
   产物：`src-tauri/target/release/bundle/dmg/clipboard-manager_0.1.0_aarch64.dmg`（签名 `Clipboard Manager Dev`）。
 - **打包注意**：① 先停 dev；② 卸载挂载的 dmg 卷要用 `hdiutil detach "/Volumes/clipboard-manager" -force 2>/dev/null || true`（**不要用 `/Volumes/clipboard*` glob**，zsh 无匹配会报错中断整条命令）。
-- **下次从这里开始**：处理《5. 未完成需求清单》里的项（如改中文 productName、Intel/universal 包等）。
+- **Windows 版**：代码已跨平台化（粘贴/快捷键/亚克力/skipTaskbar，objc 仅 mac），已写好 `.github/workflows/build-windows.yml`；项目已 `git init` 并提交。**Mac 上无法直接打 Win 包**，需推到 GitHub 由 Actions 出 `.msi/.exe`。
+- **下次从这里开始**：
+  1. 用户推送到 GitHub 后，确认 Actions 的 Windows 包能正常构建/运行；首个 Win 包视觉若有问题再调（本机无法测 Windows）。
+  2. 处理《5. 未完成需求清单》里的项（Intel/universal mac 包、图标负缓存等）。
