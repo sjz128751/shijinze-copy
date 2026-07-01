@@ -1,0 +1,72 @@
+name: Build
+
+# 云端构建 Windows(.msi/.exe) 与 macOS(.dmg，用自签名证书签名)。
+# 触发：推送到 main/master，或在 Actions 页面手动 Run workflow。
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install frontend deps
+        run: npm install
+      - name: Build Tauri (Windows)
+        run: npm run tauri build
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: shijinze-copy-windows
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: warn
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Import signing certificate
+        env:
+          CERT_B64: ${{ secrets.MAC_CERT_P12_BASE64 }}
+          CERT_PWD: ${{ secrets.MAC_CERT_PASSWORD }}
+        run: |
+          set -e
+          CERT="$RUNNER_TEMP/cert.p12"
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KPWD="$(openssl rand -base64 24)"
+          echo "$CERT_B64" | base64 --decode > "$CERT"
+          security create-keychain -p "$KPWD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KPWD" "$KEYCHAIN"
+          security import "$CERT" -k "$KEYCHAIN" -P "$CERT_PWD" -T /usr/bin/codesign -A
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KPWD" "$KEYCHAIN"
+          rm -f "$CERT"
+      - name: Install frontend deps
+        run: npm install
+      - name: Build Tauri (macOS, signed)
+        run: npm run tauri build
+      - name: Upload dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: shijinze-copy-macos
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: warn
