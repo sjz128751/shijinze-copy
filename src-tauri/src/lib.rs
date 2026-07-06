@@ -569,6 +569,46 @@ fn fire_auto_paste(app: &AppHandle, prev_pid: Option<i32>) {
     });
 }
 
+/// Windows：按主题给 main 窗口应用亚克力磨砂，模拟 macOS Sidebar 毛玻璃观感（跟随浅/深色）。
+/// 原先固定近黑 tint `(18,18,18,125)` 在浅色内容下发黑割裂；这里浅色给浅磨砂、深色给干净暗磨砂。
+#[cfg(target_os = "windows")]
+fn apply_win_acrylic(win: &tauri::WebviewWindow, theme: &str) {
+    use window_vibrancy::apply_acrylic;
+    let dark = match theme {
+        "dark" => true,
+        "light" => false,
+        _ => win_system_is_dark(), // "system" 或其它 → 跟随系统
+    };
+    let tint = if dark {
+        (43, 43, 46, 150) // 干净的暗磨砂（比原来的近黑更透亮）
+    } else {
+        (243, 243, 245, 150) // 浅磨砂，贴近 macOS 浅色 Sidebar
+    };
+    let _ = apply_acrylic(win, Some(tint));
+}
+
+/// 读注册表判断系统是否为深色外观（AppsUseLightTheme=0x0 即深色）。取不到按浅色处理。
+#[cfg(target_os = "windows")]
+fn win_system_is_dark() -> bool {
+    use std::process::Command;
+    let out = Command::new("reg")
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            "/v",
+            "AppsUseLightTheme",
+        ])
+        .output();
+    if let Ok(o) = out {
+        let s = String::from_utf8_lossy(&o.stdout);
+        // 输出形如: AppsUseLightTheme    REG_DWORD    0x0
+        if let Some(idx) = s.find("0x") {
+            return s[idx..].starts_with("0x0");
+        }
+    }
+    false
+}
+
 #[tauri::command]
 fn copy_item(app: AppHandle, id: u64, state: State<'_, AppState>) {
     // 仅复制 + 移顶 + 隐藏窗口（不模拟粘贴）。
@@ -1516,6 +1556,18 @@ fn show_main_window(app: &AppHandle) {
             position_at_cursor(app, &win);
         }
         let _ = win.set_focus();
+        // Windows：每次弹出按当前主题重刷亚克力，跟随「系统」浅/深色切换与主题设置变更。
+        #[cfg(target_os = "windows")]
+        {
+            let theme = app
+                .state::<AppState>()
+                .0
+                .lock()
+                .ok()
+                .map(|i| i.settings.theme.clone())
+                .unwrap_or_else(|| "system".to_string());
+            apply_win_acrylic(&win, &theme);
+        }
         let _ = app.emit("window-shown", ());
     }
 }
@@ -2049,9 +2101,15 @@ pub fn run() {
             // 让透明窗口呈现类似 macOS 毛玻璃的半透明效果；失败不影响其余功能。
             #[cfg(target_os = "windows")]
             {
-                use window_vibrancy::apply_acrylic;
                 if let Some(win) = app.get_webview_window("main") {
-                    let _ = apply_acrylic(&win, Some((18, 18, 18, 125)));
+                    let theme = app
+                        .state::<AppState>()
+                        .0
+                        .lock()
+                        .ok()
+                        .map(|i| i.settings.theme.clone())
+                        .unwrap_or_else(|| "system".to_string());
+                    apply_win_acrylic(&win, &theme);
                 }
             }
 
