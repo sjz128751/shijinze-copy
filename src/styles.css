@@ -60,6 +60,12 @@ body {
   overflow: hidden;
 }
 
+/* Windows：内容填满矩形窗口，不用 CSS 圆角（否则四角露出下层直角亚克力）。
+   窗口圆角由系统 DWM 处理（Win11 圆角 / Win10 直角）。 */
+.os-windows .app {
+  border-radius: 0;
+}
+
 /* ===== Toolbar ===== */
 .toolbar {
   position: sticky;

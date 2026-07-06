@@ -595,6 +595,31 @@ fn apply_win_acrylic(win: &tauri::WebviewWindow, theme: &str) {
     let _ = apply_acrylic(win, Some(tint));
 }
 
+/// Windows 11：用 DWM 把窗口四角设为圆角（DWMWCP_ROUND）。Win10 不支持，调用无害（返回错误）。
+/// 配合前端 `.os-windows .app{border-radius:0}`：内容填满矩形、由系统裁圆角，避免四角露直角亚克力。
+#[cfg(target_os = "windows")]
+fn set_window_rounded(win: &tauri::WebviewWindow) {
+    use std::os::raw::c_void;
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    const DWMWCP_ROUND: u32 = 2;
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmSetWindowAttribute(hwnd: *mut c_void, attr: u32, value: *const c_void, size: u32)
+            -> i32;
+    }
+    if let Ok(hwnd) = win.hwnd() {
+        let pref: u32 = DWMWCP_ROUND;
+        unsafe {
+            DwmSetWindowAttribute(
+                hwnd.0 as *mut c_void,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                &pref as *const u32 as *const c_void,
+                4,
+            );
+        }
+    }
+}
+
 /// 读注册表判断系统是否为深色外观（AppsUseLightTheme=0x0 即深色）。取不到按浅色处理。
 #[cfg(target_os = "windows")]
 fn win_system_is_dark() -> bool {
@@ -2130,6 +2155,7 @@ pub fn run() {
                         .map(|i| i.settings.theme.clone())
                         .unwrap_or_else(|| "system".to_string());
                     apply_win_acrylic(&win, &theme);
+                    set_window_rounded(&win);
                 }
             }
 

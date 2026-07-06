@@ -1308,6 +1308,11 @@ function onWindowShown(): void {
 }
 
 async function init(): Promise<void> {
+  // Windows：内容填满矩形窗口（去掉 .app 圆角），避免圆角内容露出下层直角亚克力；
+  // 窗口圆角交给系统 DWM（Win11 圆角 / Win10 直角）。macOS 保留 CSS 圆角配合 vibrancy。
+  if (navigator.userAgent.includes("Windows")) {
+    document.documentElement.classList.add("os-windows");
+  }
   listEl = document.querySelector("#list") as HTMLElement;
   // 滚动时主动让高亮跟随光标（绕过 WKWebView 滚动期间不更新 :hover 的限制）。
   listEl.addEventListener("scroll", onListScroll, { passive: true });
