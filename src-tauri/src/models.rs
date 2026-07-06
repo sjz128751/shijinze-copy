@@ -59,6 +59,15 @@ pub fn default_image_thumb_height() -> u32 {
     18
 }
 
+pub fn default_sync_port() -> u32 {
+    9999
+}
+
+/// 单条文本最大字符数（超过则不记录）。默认 10 万字符（~100KB），0 表示不限制。
+pub fn default_max_text_length() -> u32 {
+    100000
+}
+
 /// 剪贴板历史项。前端按 camelCase 字段使用。
 ///
 /// 向后兼容旧 history.json（仅含 id/text/timestamp）：
@@ -83,6 +92,14 @@ pub struct ClipItem {
     /// serde rename_all=camelCase 会序列化为 imagePath。
     #[serde(default)]
     pub image_path: Option<String>,
+    /// kind=image 时有：像素宽高（前端展示「1920×1080」）。旧数据缺失，加载时回填。
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+    /// kind=image 时有：原始 PNG 字节数（前端展示「256 KB」）。旧数据缺失，加载时回填。
+    #[serde(default)]
+    pub size: Option<u64>,
     /// Unix 毫秒时间戳。
     pub timestamp: u64,
     /// 是否置顶收藏。置顶项排在最前、不计入历史上限、不被淘汰。
@@ -145,8 +162,8 @@ pub struct Settings {
     /// 选中并回车/点击后是否模拟 ⌘V 自动粘贴到前台 App，默认 true。
     #[serde(default = "default_true")]
     pub paste_on_select: bool,
-    /// 是否忽略密码/敏感(concealed/transient)剪贴板内容，默认 true。
-    #[serde(default = "default_true")]
+    /// 是否忽略密码/敏感(concealed/transient)剪贴板内容，默认 false（不忽略）。
+    #[serde(default)]
     pub ignore_concealed: bool,
     /// 主窗口高度（px），默认 760，合理范围 360..=1400。
     #[serde(default = "default_window_height")]
@@ -172,6 +189,34 @@ pub struct Settings {
     /// 图片项缩略图高度（px），默认 18，合理范围 14..=48。
     #[serde(default = "default_image_thumb_height")]
     pub image_thumb_height: u32,
+
+    // ===== 云同步（可选功能，默认全关；关闭时零联网、零影响单机版）=====
+    /// 是否开启云同步（登录后周期性上传/下载加密历史 + 发心跳）。默认 false。
+    #[serde(default)]
+    pub sync_enabled: bool,
+    /// 是否使用自建服务器。false（默认）时走内置默认后端 copy.nihaoiii.fun:80，
+    /// 忽略 sync_host / sync_port；true 时才用下面填的 IP / 端口。
+    #[serde(default)]
+    pub sync_self_host: bool,
+    /// 自建服务器 IP / 域名（仅 sync_self_host=true 时生效），如 "192.168.1.10"。空表示未配置。
+    #[serde(default)]
+    pub sync_host: String,
+    /// 自建服务器端口（仅 sync_self_host=true 时生效），默认 9999。
+    #[serde(default = "default_sync_port")]
+    pub sync_port: u32,
+    /// 端到端加密同步密钥（口令）。两台设备须填一致；服务端只存密文、解不开。空表示未配置。
+    #[serde(default)]
+    pub sync_key: String,
+
+    /// 历史数据自定义存储目录（history/favorites/icons/images 都存这里）。
+    /// 空字符串（默认）= 用系统默认 app_data_dir。仅经 change_data_dir/reset_data_dir 变更。
+    #[serde(default)]
+    pub data_dir: String,
+
+    /// 单条文本最大字符数：超过则不记录（避免超大文本进历史后全量 IPC 重发/渲染卡死）。
+    /// 默认 10 万；0 = 不限制。
+    #[serde(default = "default_max_text_length")]
+    pub max_text_length: u32,
 }
 
 impl Default for Settings {
@@ -185,7 +230,7 @@ impl Default for Settings {
             accent: default_accent(),
             history_size: default_history_size(),
             paste_on_select: true,
-            ignore_concealed: true,
+            ignore_concealed: false,
             window_height: default_window_height(),
             popup_position: default_popup_position(),
             pinned_position: default_pinned_position(),
@@ -194,6 +239,13 @@ impl Default for Settings {
             show_numbers: true,
             highlight_match: default_highlight_match(),
             image_thumb_height: default_image_thumb_height(),
+            sync_enabled: false,
+            sync_self_host: false,
+            sync_host: String::new(),
+            sync_port: default_sync_port(),
+            sync_key: String::new(),
+            data_dir: String::new(),
+            max_text_length: default_max_text_length(),
         }
     }
 }

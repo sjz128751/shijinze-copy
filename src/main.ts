@@ -8,6 +8,9 @@ interface ClipItem {
   files: string[] | null;
   thumbnail: string | null;
   imagePath: string | null;
+  width?: number | null;
+  height?: number | null;
+  size?: number | null;
   timestamp: number;
   pinned: boolean;
   sourceApp?: string | null;
@@ -103,6 +106,13 @@ function basename(p: string): string {
   return idx >= 0 ? norm.slice(idx + 1) : norm;
 }
 
+/** 字节数格式化为可读大小（B/KB/MB），供图片项展示。 */
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 /** 用于搜索/匹配的可读文本。 */
 function searchableText(it: ClipItem): string {
   if (it.kind === "text") return it.text ?? "";
@@ -161,6 +171,13 @@ function appendIconCell(row: HTMLElement, item: ClipItem): void {
     img.draggable = false;
     img.src = item.thumbnail;
     icon.appendChild(img);
+    // 点缩略图 → 弹出大图预览（不冒泡到整行的粘贴）。
+    icon.classList.add("previewable");
+    icon.title = "点击预览";
+    icon.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void openImagePreview(item.id);
+    });
   } else {
     const appIcon = settings.showSourceIcon ? sourceIconFor(item) : null;
     if (appIcon) {
@@ -187,8 +204,11 @@ function appendTextCell(
   const textEl = document.createElement("div");
   textEl.className = "item-text";
   if (item.kind === "image") {
-    textEl.textContent = "图片";
-    textEl.classList.add("dim");
+    // 用有用信息替代占位：尺寸 + 大小（如 1920×1080 · 256 KB），都取不到才退回「图片」。
+    const dim = item.width && item.height ? `${item.width}×${item.height}` : "";
+    const sz = item.size ? formatBytes(item.size) : "";
+    textEl.textContent = [dim, sz].filter(Boolean).join(" · ") || "图片";
+    textEl.classList.add("meta"); // 用强调色，和正常文字区分开（选中态由 CSS 自动转白）
   } else if (item.kind === "files") {
     const files = item.files ?? [];
     const first = files.length ? basename(files[0]) : "文件";
@@ -196,11 +216,155 @@ function appendTextCell(
       files.length > 1 ? `${first} 等 ${files.length} 个文件` : first;
     appendMaybeHighlighted(textEl, label, highlight);
   } else {
-    // 折叠空白为单行展示；textContent/文本节点 防注入
-    const label = (item.text ?? "").replace(/\s+/g, " ").trim();
+    // 折叠空白为单行展示；先截断到 ~300 字符再处理，防超长文本的正则/DOM 拖慢渲染。
+    const raw = item.text ?? "";
+    const label = (raw.length > 300 ? raw.slice(0, 300) : raw).replace(/\s+/g, " ").trim();
     appendMaybeHighlighted(textEl, label, highlight);
   }
   row.appendChild(textEl);
+}
+
+async function openImagePreview(id: number): Promise<void> {
+  try {
+    const dataUrl = await invoke<string | null>("get_image_data_url", { id });
+    if (dataUrl) showLightbox(dataUrl);
+  } catch (err) {
+    console.error("get_image_data_url failed", err);
+  }
+}
+
+let lightboxEl: HTMLElement | null = null;
+function onLightboxKey(e: KeyboardEvent): void {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    e.stopPropagation(); // 先于全局 Esc（否则会去隐藏窗口）
+    closeLightbox();
+  }
+}
+function closeLightbox(): void {
+  if (lightboxEl) {
+    lightboxEl.remove();
+    lightboxEl = null;
+    window.removeEventListener("keydown", onLightboxKey, true);
+  }
+}
+function showLightbox(src: string): void {
+  closeLightbox();
+  const ov = document.createElement("div");
+  ov.className = "lightbox";
+
+  // 舞台：定位容器（overflow hidden），图片用 transform 缩放 + 平移，可拖动看全图。
+  const stage = document.createElement("div");
+  stage.className = "lightbox-stage";
+  stage.addEventListener("click", () => closeLightbox()); // 点空白处关闭
+
+  const img = document.createElement("img");
+  img.className = "lightbox-img";
+  img.draggable = false;
+
+  let k = 1; // 显示缩放（1 = 图片自然像素）
+  let panX = 0;
+  let panY = 0;
+  let fitted = true; // 适应窗口模式
+  let dragging = false;
+  let moved = false; // 本次按下是否发生了拖动（用于区分拖动与点击）
+  let sx = 0;
+  let sy = 0;
+  let basePanX = 0;
+  let basePanY = 0;
+
+  const fitK = (): number => {
+    const nw = img.naturalWidth || 1;
+    const nh = img.naturalHeight || 1;
+    return Math.min((stage.clientWidth * 0.98) / nw, (stage.clientHeight * 0.98) / nh, 1);
+  };
+  const render = () => {
+    img.style.transform = `translate(-50%, -50%) translate(${panX}px, ${panY}px) scale(${k})`;
+    img.style.cursor = dragging ? "grabbing" : fitted ? "zoom-in" : "grab";
+  };
+  img.addEventListener("load", () => {
+    img.style.width = `${img.naturalWidth}px`; // 基准尺寸=自然像素，缩放交给 transform
+    k = fitK();
+    panX = 0;
+    panY = 0;
+    fitted = true;
+    render();
+  });
+
+  // 拖拽平移（放大后看全图）。
+  img.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragging = true;
+    moved = false;
+    sx = e.clientX;
+    sy = e.clientY;
+    basePanX = panX;
+    basePanY = panY;
+    render();
+  });
+  ov.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    const dx = e.clientX - sx;
+    const dy = e.clientY - sy;
+    if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
+    panX = basePanX + dx;
+    panY = basePanY + dy;
+    render();
+  });
+  ov.addEventListener("mouseup", () => {
+    if (dragging) {
+      dragging = false;
+      render();
+    }
+  });
+  // 点图片（非拖动）：适应窗口 <-> 实际像素 来回切换。
+  img.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (moved) {
+      moved = false;
+      return; // 刚才是拖动，不当作点击
+    }
+    if (fitted) {
+      fitted = false;
+      k = 1; // 实际像素（放大）
+    } else {
+      fitted = true;
+      k = fitK();
+    }
+    panX = 0;
+    panY = 0;
+    render();
+  });
+  // 滚轮自由缩放（围绕中心）。
+  stage.addEventListener(
+    "wheel",
+    (e) => {
+      e.preventDefault();
+      fitted = false;
+      k = Math.min(8, Math.max(0.05, k * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+      render();
+    },
+    { passive: false },
+  );
+  img.src = src;
+  stage.appendChild(img);
+
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "lightbox-close";
+  close.textContent = "✕";
+  close.title = "关闭 (Esc)";
+  close.addEventListener("click", (e) => {
+    e.stopPropagation();
+    closeLightbox();
+  });
+
+  ov.appendChild(stage);
+  ov.appendChild(close);
+  document.body.appendChild(ov);
+  lightboxEl = ov;
+  window.addEventListener("keydown", onLightboxKey, true);
 }
 
 function buildItemEl(item: ClipItem, index: number): HTMLElement {
@@ -238,7 +402,7 @@ function buildItemEl(item: ClipItem, index: number): HTMLElement {
     pasteItem(item.id);
   });
   row.addEventListener("mousemove", (e) => {
-    lastPointer = { x: e.clientX, y: e.clientY };
+    if (!trackPointer(e.clientX, e.clientY)) return; // 弹出后未真正移动鼠标：不跟随，保持第 0 行
     if (selected !== index) {
       selected = index;
       updateSelectionUI(false);
@@ -274,26 +438,129 @@ function historyMenuActions(item: ClipItem): MenuAction[] {
 function buildFavEl(item: ClipItem): HTMLElement {
   const row = document.createElement("div");
   row.className = `item fav-item kind-${item.kind}`;
+  if (item.pinned) row.classList.add("pinned");
+  row.dataset.favId = String(item.id);
   row.setAttribute("role", "button");
   row.tabIndex = -1;
 
+  // 拖拽手动排序：用鼠标事件实现（WKWebView 对 HTML5 draggable 支持差）。
+  row.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    favDrag = { id: item.id, startY: e.clientY, active: false, row, targetId: null, after: false };
+  });
+
   appendIconCell(row, item);
   appendTextCell(row, item);
+  if (item.pinned) {
+    const pin = document.createElement("span");
+    pin.className = "item-pin";
+    pin.title = "已置顶";
+    pin.textContent = "📌";
+    row.appendChild(pin);
+  }
 
   // 移除走右键菜单，不再放 hover ✕ 按钮。
-  row.addEventListener("click", () => pasteFavorite(item.id));
+  row.addEventListener("click", () => {
+    if (suppressFavClick) {
+      suppressFavClick = false;
+      return; // 刚才是拖拽，吞掉这次点击（不粘贴）
+    }
+    pasteFavorite(item.id);
+  });
   row.addEventListener("mousemove", (e) => {
-    lastPointer = { x: e.clientX, y: e.clientY };
+    if (favDrag && favDrag.active) return; // 拖拽中不跟随高亮
+    if (!trackPointer(e.clientX, e.clientY)) return; // 弹出后未真正移动鼠标：不跟随
     setFavHover(row);
   });
   row.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     showContextMenu(e.clientX, e.clientY, [
+      {
+        label: item.pinned ? "取消置顶" : "置顶",
+        run: () => toggleFavPin(item.id),
+      },
       { label: "从常用移除", danger: true, run: () => removeFavorite(item.id) },
     ]);
   });
 
   return row;
+}
+
+/** 常用拖拽手动排序状态（鼠标事件实现；WKWebView 对 HTML5 draggable 支持差）。 */
+let favDrag:
+  | { id: number; startY: number; active: boolean; row: HTMLElement; targetId: number | null; after: boolean }
+  | null = null;
+/** 拖拽结束后吞掉紧随的 click，避免误触发粘贴。 */
+let suppressFavClick = false;
+
+function clearDropMarks(): void {
+  favEl
+    .querySelectorAll(".drop-before, .drop-after")
+    .forEach((el) => el.classList.remove("drop-before", "drop-after"));
+}
+
+/** 文档级拖拽移动：判定拖拽激活、计算落点、画插入线。 */
+function onFavDragMove(e: MouseEvent): void {
+  if (!favDrag) return;
+  if (!favDrag.active) {
+    if (Math.abs(e.clientY - favDrag.startY) < 4) return; // 未超阈值：还算点击
+    favDrag.active = true;
+    favDrag.row.classList.add("dragging");
+    document.body.style.userSelect = "none";
+  }
+  e.preventDefault();
+  const rows = Array.from(favEl.querySelectorAll<HTMLElement>(".fav-item"));
+  clearDropMarks();
+  favDrag.targetId = null;
+  let target: HTMLElement | null = null;
+  let after = false;
+  for (const r of rows) {
+    if (r === favDrag.row) continue;
+    const rect = r.getBoundingClientRect();
+    if (e.clientY >= rect.top && e.clientY <= rect.bottom) {
+      target = r;
+      after = e.clientY > rect.top + rect.height / 2;
+      break;
+    }
+  }
+  // 指针在所有行下方 → 落到末尾
+  if (!target && rows.length) {
+    const last = rows[rows.length - 1];
+    if (last !== favDrag.row && e.clientY > last.getBoundingClientRect().bottom) {
+      target = last;
+      after = true;
+    }
+  }
+  if (target) {
+    target.classList.toggle("drop-after", after);
+    target.classList.toggle("drop-before", !after);
+    favDrag.targetId = Number(target.dataset.favId);
+    favDrag.after = after;
+  }
+}
+
+/** 文档级拖拽松手：激活则执行重排，否则当普通点击。 */
+function onFavDragUp(): void {
+  if (!favDrag) return;
+  const d = favDrag;
+  favDrag = null;
+  clearDropMarks();
+  document.body.style.userSelect = "";
+  if (d.active) {
+    d.row.classList.remove("dragging");
+    suppressFavClick = true;
+    setTimeout(() => {
+      suppressFavClick = false;
+    }, 0);
+    if (d.targetId != null && d.targetId !== d.id) {
+      void reorderFavorite(d.id, d.targetId, d.after);
+    }
+  }
+}
+
+/** 常用项展示顺序：置顶项排最前（稳定排序，保留手动/规则排序的相对顺序）。 */
+function sortedFavItems(items: ClipItem[]): ClipItem[] {
+  return [...items].sort((a, b) => Number(b.pinned) - Number(a.pinned));
 }
 
 /** 当前激活分组（activeGroupId 不存在则回退第一个）。 */
@@ -402,17 +669,61 @@ function startTabRename(groupId: number, current: string): void {
 function renderFavorites(): void {
   favEl.replaceChildren();
   favHoverEl = null; // 旧高亮行已被移除，重置引用
-  const its = activeGroup()?.items ?? [];
-  if (its.length === 0) {
+  const raw = activeGroup()?.items ?? [];
+  if (raw.length === 0) {
     const empty = document.createElement("div");
     empty.className = "fav-empty";
-    empty.textContent = "右键历史项 → 加入常用";
+    empty.textContent = "右键历史项加入常用，或右键此处新建";
     favEl.appendChild(empty);
     return;
   }
+  const its = sortedFavItems(raw);
   const frag = document.createDocumentFragment();
   its.forEach((it) => frag.appendChild(buildFavEl(it)));
   favEl.appendChild(frag);
+}
+
+/** 在当前分组顶部插入一个内联输入框，手动新建一条文本常用（Enter 保存 / Esc 取消）。 */
+function startNewFavInput(): void {
+  closeContextMenu();
+  const g = activeGroup();
+  if (!g) return;
+  const existing = favEl.querySelector<HTMLInputElement>(".fav-new-input");
+  if (existing) {
+    existing.focus();
+    return;
+  }
+  // 有空占位则先移除，避免输入框和「右键历史项…」提示并存。
+  favEl.querySelector(".fav-empty")?.remove();
+  const input = document.createElement("input");
+  input.className = "fav-new-input";
+  input.placeholder = "输入常用内容，回车保存";
+  favEl.prepend(input);
+  input.focus();
+  let done = false;
+  const commit = (save: boolean) => {
+    if (done) return;
+    done = true;
+    const text = input.value.trim();
+    input.remove();
+    if (save && text) {
+      void addFavText(text, g.id); // 成功后 favorites-updated 会重渲染
+    } else {
+      renderFavorites(); // 取消：恢复空占位/原列表
+    }
+  };
+  // stopPropagation：否则 onGlobalKeydown 会把字符抢去搜索框、方向键拿去导航历史。
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commit(true);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      commit(false);
+    }
+  });
+  input.addEventListener("blur", () => commit(true));
 }
 
 // ===== 右键上下文菜单 =====
@@ -553,6 +864,37 @@ function updateSelectionUI(scroll = false): void {
 /** 鼠标最后位置（视口坐标），用于在滚动时主动判定光标下的行。 */
 let lastPointer: { x: number; y: number } | null = null;
 let pointerSelRaf = 0;
+/**
+ * 程序化滚动计数（>0 表示当前的 scroll 是我们自己触发的，如 kickListPaint 的补绘位移）。
+ * 此类滚动不应触发「跟随光标选中」——否则会把选中从第 0 行抢到上次鼠标停留的那行。
+ */
+let programmaticScrolls = 0;
+/**
+ * 鼠标是否「真正移动过」。弹窗出现在光标处，光标此刻正压在列表中间某行上，系统会派发一个
+ * 「原地」mousemove，若直接跟随就会把选中抢到中间行。故弹出后复位为 false，先锁定第 0 行；
+ * 只有后续鼠标相对基准位置明显位移，才认定用户真的动了鼠标（arm），此后才跟随光标。
+ */
+let pointerArmed = false;
+/** 弹出后第一个 mousemove 的坐标基准（即光标压住的静止位置），用于判定是否真的移动了。 */
+let pointerBaseline: { x: number; y: number } | null = null;
+
+/**
+ * 处理一次 mousemove：更新坐标并判定是否应当跟随光标。
+ * 首个事件只记为基准（不 arm）；相对基准位移超过阈值才 arm。已 arm 后恒为 true。
+ */
+function trackPointer(x: number, y: number): boolean {
+  lastPointer = { x, y };
+  if (pointerArmed) return true;
+  if (!pointerBaseline) {
+    pointerBaseline = { x, y };
+    return false;
+  }
+  if (Math.abs(x - pointerBaseline.x) > 2 || Math.abs(y - pointerBaseline.y) > 2) {
+    pointerArmed = true;
+    return true;
+  }
+  return false;
+}
 
 /**
  * 用鼠标最后位置算出光标正下方的历史行并高亮。
@@ -560,7 +902,7 @@ let pointerSelRaf = 0;
  * 让高亮在滚动过程中即时跟随光标所在行。
  */
 function selectUnderPointer(): void {
-  if (!lastPointer) return;
+  if (!pointerArmed || !lastPointer) return;
   const el = document.elementFromPoint(lastPointer.x, lastPointer.y);
   const row = el ? (el as HTMLElement).closest(".item") : null;
   if (row && listEl.contains(row)) {
@@ -572,8 +914,9 @@ function selectUnderPointer(): void {
   }
 }
 
-/** listEl 滚动时（rAF 节流）主动刷新光标下的高亮。 */
+/** listEl 滚动时（rAF 节流）主动刷新光标下的高亮。程序化滚动跳过，避免抢占选中。 */
 function onListScroll(): void {
+  if (programmaticScrolls > 0) return;
   if (pointerSelRaf) return;
   pointerSelRaf = requestAnimationFrame(() => {
     pointerSelRaf = 0;
@@ -596,7 +939,7 @@ function setFavHover(row: HTMLElement | null): void {
 
 /** 用鼠标最后位置算出常用列中光标下的行并高亮（绕过滚动期间 :hover 不更新）。 */
 function favHoverUnderPointer(): void {
-  if (!lastPointer) return;
+  if (!pointerArmed || !lastPointer) return;
   const el = document.elementFromPoint(lastPointer.x, lastPointer.y);
   const row = el ? (el as HTMLElement).closest(".fav-item") : null;
   if (row && favEl.contains(row)) {
@@ -668,6 +1011,14 @@ async function addGroup(): Promise<void> {
   }
 }
 
+async function addFavText(text: string, groupId: number): Promise<void> {
+  try {
+    await invoke("add_fav_text", { text, groupId });
+  } catch (err) {
+    console.error("add_fav_text failed", err);
+  }
+}
+
 async function renameGroup(groupId: number, name: string): Promise<void> {
   try {
     await invoke("rename_group", { groupId, name });
@@ -682,6 +1033,53 @@ async function deleteGroup(groupId: number): Promise<void> {
   } catch (err) {
     console.error("delete_group failed", err);
   }
+}
+
+async function toggleFavPin(id: number): Promise<void> {
+  try {
+    await invoke("toggle_fav_pin", { id });
+  } catch (err) {
+    console.error("toggle_fav_pin failed", err);
+  }
+}
+
+/** 拖拽后按「看到的顺序」重排：把 dragId 移到 targetId 前/后，整条新顺序发给后端。 */
+async function reorderFavorite(dragId: number, targetId: number, after: boolean): Promise<void> {
+  const g = activeGroup();
+  if (!g) return;
+  // 以渲染顺序（置顶在前）为基准计算，存回后端后再次置顶排序是幂等的。
+  const ids = sortedFavItems(g.items)
+    .map((i) => i.id)
+    .filter((id) => id !== dragId);
+  const ti = ids.indexOf(targetId);
+  if (ti < 0) return;
+  ids.splice(after ? ti + 1 : ti, 0, dragId);
+  try {
+    await invoke("reorder_favorites", { groupId: g.id, orderedIds: ids });
+  } catch (err) {
+    console.error("reorder_favorites failed", err);
+  }
+}
+
+/** 按规则排序当前分组：by = "time" | "text" | "kind"。 */
+async function sortFavorites(by: string): Promise<void> {
+  const g = activeGroup();
+  if (!g) return;
+  try {
+    await invoke("sort_favorites", { groupId: g.id, by });
+  } catch (err) {
+    console.error("sort_favorites failed", err);
+  }
+}
+
+/** 常用排序菜单项（排序按钮 + 空白右键共用）。 */
+function favSortActions(): MenuAction[] {
+  return [
+    { label: "排序方式", header: true },
+    { label: "　按加入时间", run: () => sortFavorites("time") },
+    { label: "　按字母", run: () => sortFavorites("text") },
+    { label: "　按类型", run: () => sortFavorites("kind") },
+  ];
 }
 
 async function removeFavorite(id: number): Promise<void> {
@@ -839,15 +1237,69 @@ function onGlobalKeydown(e: KeyboardEvent): void {
   }
 }
 
-/** 每次窗口显示：聚焦搜索框、清空搜索、选中第 0 项。 */
+/**
+ * 逼 WKWebView 为历史列表 `#list` 生成绘制图块。
+ *
+ * 坑（已定位）：`#list` 是超一屏的 overflow 滚动容器，窗口刚显示时 WKWebView **不会**
+ * 为它光栅化，非得一次**真实的滚动位移**才触发——所以手动滚一下就有。跟内容何时渲染无关
+ * （右侧「常用」短、不足一屏，所以从不受影响）。
+ *
+ * 复刻用户手滚那一下：真提交一次 2px 位移、下一帧再复位（**不能同帧 0→2→0**，会被合成器
+ * 合并成零位移、不触发绘制）。纯滚动、无重排 → 不卡；2px 一帧几乎不可见。
+ * 在 rAF / 100ms / 250ms 各打一发，赢过「窗口显示动画未结束、webview 尚不可绘制」的时序竞态。
+ */
+function kickListPaint(): void {
+  const el = listEl;
+  const nudge = (): void => {
+    if (!el || el.scrollHeight <= el.clientHeight) return; // 不足一屏本就没这坑
+    const top = el.scrollTop;
+    // 标记为程序化滚动，让 onListScroll 跳过「跟随光标选中」（否则会抢占第 0 行的选中）。
+    programmaticScrolls++;
+    el.scrollTop = top + 2;
+    requestAnimationFrame(() => {
+      el.scrollTop = top;
+      // 再等一帧，确保这两次 scrollTop 触发的 scroll 事件都在守卫内被跳过后再解除。
+      requestAnimationFrame(() => {
+        programmaticScrolls--;
+      });
+    });
+  };
+  requestAnimationFrame(nudge);
+  window.setTimeout(nudge, 100);
+  window.setTimeout(nudge, 250);
+}
+
+/**
+ * 每次窗口显示：聚焦搜索框、清空搜索、选中回第 0 项。
+ *
+ * 关键设计：**绝不在窗口显示的瞬间无谓地重建列表 DOM**。
+ * 「显示瞬间对滚动容器 replaceChildren」会加剧 WKWebView 的显示时不合成问题；列表内容更新
+ * 交给 history-updated 事件（那时窗口已稳定）。这里只做轻量复位：
+ *   - 上次留有搜索词 → 清空会改变过滤结果，只能重建一次；
+ *   - 否则内容与上次一致 → 一个节点都不动，让上次已绘制好的 DOM 直接显示，只移选中高亮回顶部。
+ * 最后统一给 `#list` 补一次滚动位移，逼 WKWebView 出图块（避免超一屏历史首开空白）。
+ */
 function onWindowShown(): void {
   closeContextMenu();
+  closeLightbox(); // 重新呼出窗口时不残留上次的图片预览弹框
+  // 弹窗出现在光标处、光标正压在中间某行上：复位「鼠标未移动」状态，先锁定第 0 行，
+  // 系统派发的「原地」mousemove 只记基准、不跟随；只有用户真的移动鼠标后才开始跟随光标。
+  lastPointer = null;
+  pointerArmed = false;
+  pointerBaseline = null;
+  const hadQuery = query.length > 0;
   searchEl.value = "";
   query = "";
   selected = 0;
-  render();
+  if (hadQuery) {
+    render();
+  } else {
+    updateSelectionUI(false);
+    listEl.scrollTop = 0;
+  }
   searchEl.focus();
   searchEl.select();
+  kickListPaint();
 }
 
 async function init(): Promise<void> {
@@ -856,9 +1308,39 @@ async function init(): Promise<void> {
   listEl.addEventListener("scroll", onListScroll, { passive: true });
   favEl = document.querySelector("#favorites") as HTMLElement;
   favEl.addEventListener("scroll", onFavScroll, { passive: true });
+  // 常用拖拽排序的文档级监听（一次）。
+  document.addEventListener("mousemove", onFavDragMove);
+  document.addEventListener("mouseup", onFavDragUp);
   // 鼠标移出常用列时清掉高亮。
   favEl.addEventListener("mouseleave", () => setFavHover(null));
+  // 常用列表空白处右键 → 新建 / 排序（点在某个常用项上时交给该项自己的菜单）。
+  favEl.addEventListener("contextmenu", (e) => {
+    if ((e.target as HTMLElement).closest(".fav-item")) return;
+    e.preventDefault();
+    showContextMenu(e.clientX, e.clientY, [
+      { label: "新建常用记录", run: () => startNewFavInput() },
+      { label: "", separator: true },
+      ...favSortActions(),
+    ]);
+  });
+  // 排序按钮：弹出排序菜单。
+  const favSortBtn = document.querySelector("#fav-sort") as HTMLButtonElement;
+  favSortBtn.addEventListener("click", () => {
+    const r = favSortBtn.getBoundingClientRect();
+    showContextMenu(r.right, r.bottom, favSortActions());
+  });
   favTabsEl = document.querySelector("#fav-tabs") as HTMLElement;
+  // 分组标签条横向溢出时，把竖直鼠标滚轮转成左右滚动（触控板的横向滑动 deltaX 仍走默认）。
+  favTabsEl.addEventListener(
+    "wheel",
+    (e) => {
+      if (e.deltaY === 0) return;
+      if (favTabsEl.scrollWidth <= favTabsEl.clientWidth) return; // 没溢出不拦
+      e.preventDefault();
+      favTabsEl.scrollLeft += e.deltaY;
+    },
+    { passive: false },
+  );
   searchEl = document.querySelector("#search") as HTMLInputElement;
   settingsBtn = document.querySelector("#settings-btn") as HTMLButtonElement;
   appTitleEl = document.querySelector(".app-title");

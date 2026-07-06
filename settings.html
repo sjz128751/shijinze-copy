@@ -27,6 +27,9 @@
         <button class="pref-tab" type="button" role="tab" data-tab="ignore">
           <span class="pref-tab-icon">🚫</span><span class="pref-tab-label">忽略</span>
         </button>
+        <button class="pref-tab" type="button" role="tab" data-tab="sync">
+          <span class="pref-tab-icon">🔄</span><span class="pref-tab-label">同步</span>
+        </button>
         <button class="pref-tab" type="button" role="tab" data-tab="advanced">
           <span class="pref-tab-icon">🛠️</span><span class="pref-tab-label">高级</span>
         </button>
@@ -189,6 +192,38 @@
           </div>
           <div class="setting-row column">
             <div class="setting-label">
+              <div class="setting-name">最大文字长度（字符）</div>
+              <div class="setting-desc">超过此长度的文本不记录，避免超大文本卡死；0 = 不限制</div>
+            </div>
+            <div class="range-row">
+              <input id="opt-maxtextlen" class="num-input" type="number" min="0" max="10000000" step="10000" value="100000" style="width:140px" />
+            </div>
+          </div>
+          <div class="setting-row column">
+            <div class="setting-label">
+              <div class="setting-name">数据存储位置</div>
+              <div class="setting-desc">历史 / 常用 / 图片都存这里；切换会把现有数据迁移过去</div>
+            </div>
+            <input id="data-dir-path" class="path-input" type="text" readonly placeholder="(默认位置)" />
+            <div class="clear-row">
+              <button id="data-dir-pick" class="mini-btn" type="button">选择目录…</button>
+              <button id="data-dir-reset" class="mini-btn" type="button">恢复默认</button>
+            </div>
+          </div>
+          <div class="setting-row column">
+            <div class="setting-label">
+              <div class="setting-name">常用数据 导入 / 导出</div>
+              <div class="setting-desc">把「常用」分组导出为 JSON 备份，或从备份导入</div>
+            </div>
+            <div class="clear-row">
+              <button id="fav-export" class="mini-btn" type="button">导出…</button>
+              <button id="fav-import-merge" class="mini-btn" type="button">合并导入…</button>
+              <button id="fav-import-replace" class="mini-btn" type="button">替换导入…</button>
+            </div>
+            <div id="storage-status" class="storage-status"></div>
+          </div>
+          <div class="setting-row column">
+            <div class="setting-label">
               <div class="setting-name">清空历史</div>
               <div class="setting-desc">置顶项默认保留</div>
             </div>
@@ -224,6 +259,79 @@
               <input id="opt-concealed" type="checkbox" />
               <span class="slider"></span>
             </label>
+          </div>
+        </section>
+
+        <!-- ===== 同步 ===== -->
+        <section class="tab-panel" data-tab="sync">
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-name">开启云同步</div>
+              <div class="setting-desc">登录后加密上传/下载历史；关闭时完全不联网，绝不影响本地使用</div>
+            </div>
+            <label class="switch">
+              <input id="opt-sync-enabled" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-name">自建服务器</div>
+              <div class="setting-desc">关闭则用默认后端 copy.nihaoiii.fun；开启后填自己的 IP / 端口</div>
+            </div>
+            <label class="switch">
+              <input id="opt-sync-selfhost" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="setting-row" id="sync-server-row">
+            <div class="setting-label">
+              <div class="setting-name">服务器地址</div>
+              <div class="setting-desc">自建 admin-web 的 IP 与端口</div>
+            </div>
+            <div class="sync-server-inputs">
+              <input id="opt-sync-host" class="text-input" type="text" placeholder="192.168.1.10" spellcheck="false" />
+              <span class="server-sep">:</span>
+              <input id="opt-sync-port" class="num-input" type="number" min="1" max="65535" step="1" value="9999" />
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-name">同步密钥</div>
+              <!-- 同步密钥字段暂保留（后续用途）：当前端到端加密统一用内置固定密钥，此项可不填，故不再向用户展示说明文案 -->
+            </div>
+            <input id="opt-sync-key" class="text-input" type="password" placeholder="同步密钥" spellcheck="false" />
+          </div>
+          <div class="setting-row column">
+            <div class="setting-label">
+              <div class="setting-name">账号</div>
+              <div class="setting-desc" id="sync-status-desc">未登录</div>
+            </div>
+
+            <!-- 已登录 -->
+            <div class="auth-card" id="auth-logged-in" hidden>
+              <div class="auth-user">
+                <span class="auth-avatar">👤</span>
+                <span class="auth-username" id="auth-username">—</span>
+              </div>
+              <div class="auth-row">
+                <button id="sync-now-btn" class="auth-btn" type="button">立即同步</button>
+                <button id="sync-logout-btn" class="auth-btn ghost" type="button">退出登录</button>
+              </div>
+            </div>
+
+            <!-- 未登录：登录 / 注册 -->
+            <div class="auth-card" id="auth-logged-out">
+              <div class="auth-tabs">
+                <button class="auth-tab active" id="auth-tab-login" type="button">登录</button>
+                <button class="auth-tab" id="auth-tab-register" type="button">注册</button>
+              </div>
+              <input id="opt-sync-username" class="auth-input" type="text" placeholder="用户名（3–32 位）" spellcheck="false" autocomplete="off" />
+              <input id="opt-sync-password" class="auth-input" type="password" placeholder="密码（≥6 位）" autocomplete="off" />
+              <input id="opt-sync-password2" class="auth-input" type="password" placeholder="确认密码" autocomplete="off" hidden />
+              <div class="auth-hint" id="auth-hint"></div>
+              <button id="auth-submit-btn" class="auth-btn primary" type="button">登录</button>
+            </div>
           </div>
         </section>
 

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use clipboard_rs::common::{RustImage, RustImageData};
 use clipboard_rs::{Clipboard, ClipboardContext, ContentFormat};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 /// 缩略图最长边上限。
 const THUMB_MAX: u32 = 240;
@@ -109,10 +109,9 @@ pub fn write_image_file(path: &str) -> bool {
     }
 }
 
-/// images 目录： app_data_dir()/images
+/// images 目录： <数据目录>/images（数据目录可在设置里自定义，见 crate::effective_data_dir）
 fn images_dir(app: &AppHandle) -> Option<PathBuf> {
-    let dir = app.path().app_data_dir().ok()?;
-    let d = dir.join("images");
+    let d = crate::effective_data_dir(app)?.join("images");
     let _ = std::fs::create_dir_all(&d);
     Some(d)
 }
@@ -125,17 +124,19 @@ pub fn save_image_png(app: &AppHandle, id: u64, png: &[u8]) -> Option<String> {
     Some(path.to_string_lossy().to_string())
 }
 
-/// 解码 PNG，计算稳定的像素内容哈希（用于去重），并生成缩略图 base64 data URL。
+/// 解码 PNG，计算稳定的像素内容哈希（用于去重），生成缩略图 base64 data URL，
+/// 并返回原图像素宽高。
 ///
 /// 哈希基于解码后的 RGBA 像素而非 PNG 字节，从而在「写回剪贴板→再次读出」
 /// 的往返中保持稳定，避免重复记录。
-pub fn process_image(png: &[u8]) -> Option<(u64, String)> {
+pub fn process_image(png: &[u8]) -> Option<(u64, String, u32, u32)> {
     let img = image::load_from_memory(png).ok()?;
+    let (w, h) = (img.width(), img.height());
 
     let rgba = img.to_rgba8();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    img.width().hash(&mut hasher);
-    img.height().hash(&mut hasher);
+    w.hash(&mut hasher);
+    h.hash(&mut hasher);
     rgba.as_raw().hash(&mut hasher);
     let hash = hasher.finish();
 
@@ -145,7 +146,14 @@ pub fn process_image(png: &[u8]) -> Option<(u64, String)> {
     thumb.write_to(&mut buf, image::ImageFormat::Png).ok()?;
     let b64 = STANDARD.encode(buf.into_inner());
 
-    Some((hash, format!("data:image/png;base64,{b64}")))
+    Some((hash, format!("data:image/png;base64,{b64}"), w, h))
+}
+
+/// 读取磁盘 PNG 并编码为完整分辨率的 base64 data URL（供前端大图预览）。
+pub fn read_image_data_url(path: &str) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    let b64 = STANDARD.encode(&bytes);
+    Some(format!("data:image/png;base64,{b64}"))
 }
 
 /// 规范化文件路径：去掉 file:// 前缀并做百分号解码。

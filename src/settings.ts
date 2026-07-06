@@ -19,6 +19,25 @@ interface Settings {
   showNumbers: boolean;
   highlightMatch: "bold" | "underline" | "none";
   imageThumbHeight: number;
+  syncEnabled: boolean;
+  syncSelfHost: boolean;
+  syncHost: string;
+  syncPort: number;
+  syncKey: string;
+  dataDir: string;
+  maxTextLength: number;
+}
+
+/** 同步状态（后端 get_sync_status / sync-status 事件）。 */
+interface SyncStatus {
+  enabled: boolean;
+  loggedIn: boolean;
+  username: string | null;
+  deviceId: string;
+  syncing: boolean;
+  lastSyncMs: number | null;
+  lastError: string | null;
+  lastMessage: string | null;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -30,7 +49,7 @@ const DEFAULT_SETTINGS: Settings = {
   accent: "#0a84ff",
   historySize: 200,
   pasteOnSelect: true,
-  ignoreConcealed: true,
+  ignoreConcealed: false,
   windowHeight: 760,
   popupPosition: "cursor",
   pinnedPosition: "top",
@@ -39,6 +58,13 @@ const DEFAULT_SETTINGS: Settings = {
   showNumbers: true,
   highlightMatch: "bold",
   imageThumbHeight: 18,
+  syncEnabled: false,
+  syncSelfHost: false,
+  syncHost: "",
+  syncPort: 9999,
+  syncKey: "",
+  dataDir: "",
+  maxTextLength: 100000,
 };
 
 const ACCENT_PRESETS = [
@@ -67,6 +93,19 @@ function clampThumbHeight(n: number): number {
   return Math.min(48, Math.max(14, Math.round(n)));
 }
 
+function clampPort(n: number): number {
+  if (!Number.isFinite(n)) return DEFAULT_SETTINGS.syncPort;
+  return Math.min(65535, Math.max(1, Math.round(n)));
+}
+
+/** 最大文字长度：0=不限制；否则夹到 [1000, 10000000]。 */
+function clampMaxTextLength(n: number): number {
+  if (!Number.isFinite(n)) return DEFAULT_SETTINGS.maxTextLength;
+  const r = Math.round(n);
+  if (r <= 0) return 0;
+  return Math.min(10000000, Math.max(1000, r));
+}
+
 let settings: Settings = { ...DEFAULT_SETTINGS };
 let recording = false;
 /** 当前正在录制的目标快捷键。 */
@@ -89,10 +128,19 @@ let winHeightRange: HTMLInputElement;
 let winHeightNum: HTMLInputElement;
 let thumbRange: HTMLInputElement;
 let thumbNum: HTMLInputElement;
+let maxTextInput: HTMLInputElement;
 let themeSeg: HTMLElement;
 let accentSwatches: HTMLElement;
 let clearUnpinnedBtn: HTMLButtonElement;
 let clearAllBtn: HTMLButtonElement;
+// 存储 Tab：数据目录 + 常用导入导出
+let dataDirPath: HTMLInputElement;
+let dataDirPickBtn: HTMLButtonElement;
+let dataDirResetBtn: HTMLButtonElement;
+let favExportBtn: HTMLButtonElement;
+let favImportMergeBtn: HTMLButtonElement;
+let favImportReplaceBtn: HTMLButtonElement;
+let storageStatus: HTMLElement;
 let popupPositionSel: HTMLSelectElement;
 let pinnedPositionSel: HTMLSelectElement;
 let highlightSel: HTMLSelectElement;
@@ -100,6 +148,28 @@ let appNameInput: HTMLInputElement;
 let sourceIconInput: HTMLInputElement;
 let numbersInput: HTMLInputElement;
 let resetBtn: HTMLButtonElement;
+// 同步 Tab
+let syncEnabledInput: HTMLInputElement;
+let syncSelfHostInput: HTMLInputElement;
+let syncServerRow: HTMLElement;
+let syncHostInput: HTMLInputElement;
+let syncPortInput: HTMLInputElement;
+let syncKeyInput: HTMLInputElement;
+let syncUsernameInput: HTMLInputElement;
+let syncPasswordInput: HTMLInputElement;
+let syncPassword2Input: HTMLInputElement;
+let syncLogoutBtn: HTMLButtonElement;
+let syncNowBtn: HTMLButtonElement;
+let syncStatusDesc: HTMLElement;
+let authLoggedIn: HTMLElement;
+let authLoggedOut: HTMLElement;
+let authUsername: HTMLElement;
+let authTabLogin: HTMLButtonElement;
+let authTabRegister: HTMLButtonElement;
+let authSubmitBtn: HTMLButtonElement;
+let authHint: HTMLElement;
+/** 登录 / 注册 模式。 */
+let authMode: "login" | "register" = "login";
 
 // ===== 主题 =====
 let mql: MediaQueryList | null = null;
@@ -190,12 +260,22 @@ function syncSettingsUI(): void {
   winHeightNum.value = String(settings.windowHeight);
   thumbRange.value = String(settings.imageThumbHeight);
   thumbNum.value = String(settings.imageThumbHeight);
+  if (maxTextInput) maxTextInput.value = String(settings.maxTextLength);
   popupPositionSel.value = settings.popupPosition;
   pinnedPositionSel.value = settings.pinnedPosition;
   highlightSel.value = settings.highlightMatch;
   appNameInput.checked = settings.showAppName;
   sourceIconInput.checked = settings.showSourceIcon;
   numbersInput.checked = settings.showNumbers;
+  if (syncEnabledInput) {
+    syncEnabledInput.checked = settings.syncEnabled;
+    syncSelfHostInput.checked = settings.syncSelfHost;
+    syncHostInput.value = settings.syncHost;
+    syncPortInput.value = String(settings.syncPort);
+    syncKeyInput.value = settings.syncKey;
+    updateSelfHostVisibility();
+    updateSyncControlsEnabled();
+  }
 
   for (const btn of Array.from(themeSeg.querySelectorAll<HTMLElement>(".seg-btn"))) {
     const active = btn.dataset.theme === settings.theme;
@@ -232,6 +312,13 @@ function applySettings(next: Settings): void {
         ? next.highlightMatch
         : "bold",
     imageThumbHeight: clampThumbHeight(next.imageThumbHeight ?? DEFAULT_SETTINGS.imageThumbHeight),
+    syncEnabled: !!next.syncEnabled,
+    syncSelfHost: !!next.syncSelfHost,
+    syncHost: next.syncHost ?? DEFAULT_SETTINGS.syncHost,
+    syncPort: clampPort(next.syncPort ?? DEFAULT_SETTINGS.syncPort),
+    syncKey: next.syncKey ?? DEFAULT_SETTINGS.syncKey,
+    dataDir: next.dataDir ?? DEFAULT_SETTINGS.dataDir,
+    maxTextLength: clampMaxTextLength(next.maxTextLength ?? DEFAULT_SETTINGS.maxTextLength),
   };
   applyTheme();
   buildAccentSwatches();
@@ -364,6 +451,110 @@ function onRecordKeydown(e: KeyboardEvent): void {
   persistSettings();
 }
 
+/** 仅当「自建服务器」开启时才显示 IP / 端口两行。 */
+function updateSelfHostVisibility(): void {
+  if (!syncServerRow) return;
+  syncServerRow.style.display = settings.syncSelfHost ? "" : "none";
+}
+
+/** 关闭同步开关时，禁用（置灰）下方所有同步相关输入/按钮；开启时恢复。 */
+function updateSyncControlsEnabled(): void {
+  if (!syncEnabledInput) return;
+  const off = !settings.syncEnabled;
+  const controls: (HTMLInputElement | HTMLButtonElement)[] = [
+    syncSelfHostInput,
+    syncHostInput,
+    syncPortInput,
+    syncKeyInput,
+    syncUsernameInput,
+    syncPasswordInput,
+    syncPassword2Input,
+    authTabLogin,
+    authTabRegister,
+    authSubmitBtn,
+    syncLogoutBtn,
+    syncNowBtn,
+  ];
+  for (const c of controls) {
+    if (c) c.disabled = off;
+  }
+}
+
+/** 切换登录 / 注册模式：Tab 高亮、确认密码框显隐、主按钮文案。 */
+function setAuthMode(mode: "login" | "register"): void {
+  authMode = mode;
+  authTabLogin.classList.toggle("active", mode === "login");
+  authTabRegister.classList.toggle("active", mode === "register");
+  syncPassword2Input.hidden = mode === "login";
+  authSubmitBtn.textContent = mode === "login" ? "登录" : "注册";
+  authHint.textContent = "";
+  authHint.classList.remove("ok");
+}
+
+/** 本地校验后发起登录 / 注册。 */
+async function submitAuth(): Promise<void> {
+  const username = syncUsernameInput.value.trim();
+  const password = syncPasswordInput.value;
+  authHint.classList.remove("ok");
+  if (!username || !password) {
+    authHint.textContent = "请输入用户名和密码";
+    return;
+  }
+  if (authMode === "register") {
+    if (username.length < 3 || username.length > 32) {
+      authHint.textContent = "用户名需 3–32 位";
+      return;
+    }
+    if (password.length < 6) {
+      authHint.textContent = "密码至少 6 位";
+      return;
+    }
+    if (password !== syncPassword2Input.value) {
+      authHint.textContent = "两次密码不一致";
+      return;
+    }
+  }
+  authHint.classList.add("ok");
+  authHint.textContent = authMode === "login" ? "登录中…" : "注册中…";
+  try {
+    await invoke(authMode === "login" ? "sync_login" : "sync_register", {
+      username,
+      password,
+    });
+    syncPasswordInput.value = "";
+    syncPassword2Input.value = "";
+  } catch (err) {
+    console.error("auth failed", err);
+    authHint.classList.remove("ok");
+    authHint.textContent = "请求失败";
+  }
+}
+
+/** 根据同步状态切换「已登录 / 登录注册」两块视图。 */
+function renderSyncStatus(st: SyncStatus): void {
+  if (!syncStatusDesc) return;
+  let text: string;
+  if (st.loggedIn) {
+    text = `已登录：${st.username ?? ""}`;
+    if (st.syncing) text += " · 同步中…";
+    else if (st.lastError) text += ` · ${st.lastError}`;
+    else if (st.lastSyncMs) {
+      text += ` · 上次同步 ${new Date(st.lastSyncMs).toLocaleTimeString()}`;
+    }
+    authUsername.textContent = st.username ?? "";
+  } else {
+    text = "未登录";
+    // 登录/注册失败信息显示在面板 hint 里，更醒目。
+    if (st.lastError) {
+      authHint.classList.remove("ok");
+      authHint.textContent = st.lastError;
+    }
+  }
+  syncStatusDesc.textContent = text;
+  authLoggedIn.hidden = !st.loggedIn;
+  authLoggedOut.hidden = st.loggedIn;
+}
+
 async function init(): Promise<void> {
   shortcutDisplay = document.querySelector("#shortcut-display") as HTMLElement;
   shortcutRecordBtn = document.querySelector("#shortcut-record") as HTMLButtonElement;
@@ -380,10 +571,18 @@ async function init(): Promise<void> {
   winHeightNum = document.querySelector("#opt-winheight-num") as HTMLInputElement;
   thumbRange = document.querySelector("#opt-thumbheight") as HTMLInputElement;
   thumbNum = document.querySelector("#opt-thumbheight-num") as HTMLInputElement;
+  maxTextInput = document.querySelector("#opt-maxtextlen") as HTMLInputElement;
   themeSeg = document.querySelector("#theme-seg") as HTMLElement;
   accentSwatches = document.querySelector("#accent-swatches") as HTMLElement;
   clearUnpinnedBtn = document.querySelector("#clear-unpinned") as HTMLButtonElement;
   clearAllBtn = document.querySelector("#clear-all") as HTMLButtonElement;
+  dataDirPath = document.querySelector("#data-dir-path") as HTMLInputElement;
+  dataDirPickBtn = document.querySelector("#data-dir-pick") as HTMLButtonElement;
+  dataDirResetBtn = document.querySelector("#data-dir-reset") as HTMLButtonElement;
+  favExportBtn = document.querySelector("#fav-export") as HTMLButtonElement;
+  favImportMergeBtn = document.querySelector("#fav-import-merge") as HTMLButtonElement;
+  favImportReplaceBtn = document.querySelector("#fav-import-replace") as HTMLButtonElement;
+  storageStatus = document.querySelector("#storage-status") as HTMLElement;
   popupPositionSel = document.querySelector("#opt-popup-position") as HTMLSelectElement;
   pinnedPositionSel = document.querySelector("#opt-pinned-position") as HTMLSelectElement;
   highlightSel = document.querySelector("#opt-highlight") as HTMLSelectElement;
@@ -391,6 +590,25 @@ async function init(): Promise<void> {
   sourceIconInput = document.querySelector("#opt-sourceicon") as HTMLInputElement;
   numbersInput = document.querySelector("#opt-numbers") as HTMLInputElement;
   resetBtn = document.querySelector("#reset-settings") as HTMLButtonElement;
+  syncEnabledInput = document.querySelector("#opt-sync-enabled") as HTMLInputElement;
+  syncSelfHostInput = document.querySelector("#opt-sync-selfhost") as HTMLInputElement;
+  syncServerRow = document.querySelector("#sync-server-row") as HTMLElement;
+  syncHostInput = document.querySelector("#opt-sync-host") as HTMLInputElement;
+  syncPortInput = document.querySelector("#opt-sync-port") as HTMLInputElement;
+  syncKeyInput = document.querySelector("#opt-sync-key") as HTMLInputElement;
+  syncUsernameInput = document.querySelector("#opt-sync-username") as HTMLInputElement;
+  syncPasswordInput = document.querySelector("#opt-sync-password") as HTMLInputElement;
+  syncPassword2Input = document.querySelector("#opt-sync-password2") as HTMLInputElement;
+  syncLogoutBtn = document.querySelector("#sync-logout-btn") as HTMLButtonElement;
+  syncNowBtn = document.querySelector("#sync-now-btn") as HTMLButtonElement;
+  syncStatusDesc = document.querySelector("#sync-status-desc") as HTMLElement;
+  authLoggedIn = document.querySelector("#auth-logged-in") as HTMLElement;
+  authLoggedOut = document.querySelector("#auth-logged-out") as HTMLElement;
+  authUsername = document.querySelector("#auth-username") as HTMLElement;
+  authTabLogin = document.querySelector("#auth-tab-login") as HTMLButtonElement;
+  authTabRegister = document.querySelector("#auth-tab-register") as HTMLButtonElement;
+  authSubmitBtn = document.querySelector("#auth-submit-btn") as HTMLButtonElement;
+  authHint = document.querySelector("#auth-hint") as HTMLElement;
 
   setupTabs();
   setupSystemThemeListener();
@@ -505,6 +723,14 @@ async function init(): Promise<void> {
   thumbRange.addEventListener("change", () => onThumbChange(Number(thumbRange.value)));
   thumbNum.addEventListener("change", () => onThumbChange(Number(thumbNum.value)));
 
+  // ----- 最大文字长度 -----
+  maxTextInput.addEventListener("change", () => {
+    const v = clampMaxTextLength(Number(maxTextInput.value));
+    settings = { ...settings, maxTextLength: v };
+    maxTextInput.value = String(v);
+    persistSettings();
+  });
+
   // ----- 清空 -----
   clearUnpinnedBtn.addEventListener("click", async () => {
     try {
@@ -518,6 +744,78 @@ async function init(): Promise<void> {
       await invoke("clear_history", { clearPinned: true });
     } catch (err) {
       console.error("clear_history failed", err);
+    }
+  });
+
+  // ----- 存储：数据目录 + 常用导入导出 -----
+  const setStorageStatus = (msg: string) => {
+    storageStatus.textContent = msg;
+  };
+  const refreshDataDir = async () => {
+    try {
+      dataDirPath.value = await invoke<string>("get_data_dir");
+    } catch (err) {
+      console.error("get_data_dir failed", err);
+    }
+  };
+  void refreshDataDir();
+
+  dataDirPickBtn.addEventListener("click", async () => {
+    try {
+      const dir = await invoke<string | null>("pick_data_dir");
+      if (!dir) return; // 用户取消
+      setStorageStatus("正在迁移数据…");
+      const eff = await invoke<string>("change_data_dir", { newDir: dir });
+      dataDirPath.value = eff;
+      settings = { ...settings, dataDir: eff };
+      setStorageStatus("已切换到新目录（旧目录数据已保留为备份）");
+    } catch (err) {
+      console.error("change_data_dir failed", err);
+      setStorageStatus("切换失败：" + String(err));
+    }
+  });
+
+  dataDirResetBtn.addEventListener("click", async () => {
+    try {
+      setStorageStatus("正在恢复默认…");
+      const eff = await invoke<string>("reset_data_dir");
+      dataDirPath.value = eff;
+      settings = { ...settings, dataDir: "" };
+      setStorageStatus("已恢复默认位置");
+    } catch (err) {
+      console.error("reset_data_dir failed", err);
+      setStorageStatus("恢复失败：" + String(err));
+    }
+  });
+
+  favExportBtn.addEventListener("click", async () => {
+    try {
+      const path = await invoke<string | null>("export_favorites");
+      setStorageStatus(path ? "已导出到 " + path : "已取消导出");
+    } catch (err) {
+      console.error("export_favorites failed", err);
+      setStorageStatus("导出失败：" + String(err));
+    }
+  });
+
+  favImportMergeBtn.addEventListener("click", async () => {
+    try {
+      const msg = await invoke<string | null>("import_favorites", { mode: "merge" });
+      setStorageStatus(msg ?? "已取消导入");
+    } catch (err) {
+      console.error("import_favorites failed", err);
+      setStorageStatus("导入失败：" + String(err));
+    }
+  });
+
+  favImportReplaceBtn.addEventListener("click", async () => {
+    if (!window.confirm("替换导入会清空现有全部「常用」分组，确定继续？")) return;
+    try {
+      const msg = await invoke<string | null>("import_favorites", { mode: "replace" });
+      setStorageStatus(msg ?? "已取消导入");
+    } catch (err) {
+      console.error("import_favorites failed", err);
+      setStorageStatus("导入失败：" + String(err));
     }
   });
 
@@ -540,6 +838,73 @@ async function init(): Promise<void> {
       syncSettingsUI();
       persistSettings();
     });
+  }
+
+  // ----- 同步 Tab -----
+  syncEnabledInput.addEventListener("change", () => {
+    settings = { ...settings, syncEnabled: syncEnabledInput.checked };
+    updateSyncControlsEnabled();
+    persistSettings();
+  });
+  syncSelfHostInput.addEventListener("change", () => {
+    settings = { ...settings, syncSelfHost: syncSelfHostInput.checked };
+    updateSelfHostVisibility();
+    persistSettings();
+  });
+  syncHostInput.addEventListener("change", () => {
+    settings = { ...settings, syncHost: syncHostInput.value.trim() };
+    persistSettings();
+  });
+  syncPortInput.addEventListener("change", () => {
+    const v = clampPort(Number(syncPortInput.value));
+    settings = { ...settings, syncPort: v };
+    syncPortInput.value = String(v);
+    persistSettings();
+  });
+  // 同步密钥字段暂保留（后续用途）：当前端到端加密统一用后端内置固定密钥（见 sync.rs FIXED_ENC_KEY），
+  // 用户填不填都不影响；故 UI 上不再展示说明文案。
+  syncKeyInput.addEventListener("change", () => {
+    settings = { ...settings, syncKey: syncKeyInput.value };
+    persistSettings();
+  });
+  // 登录 / 注册 面板：Tab 切换 + 回车提交 + 主按钮
+  authTabLogin.addEventListener("click", () => setAuthMode("login"));
+  authTabRegister.addEventListener("click", () => setAuthMode("register"));
+  authSubmitBtn.addEventListener("click", () => {
+    void submitAuth();
+  });
+  for (const inp of [syncUsernameInput, syncPasswordInput, syncPassword2Input]) {
+    inp.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        void submitAuth();
+      }
+    });
+  }
+  setAuthMode("login");
+  syncLogoutBtn.addEventListener("click", async () => {
+    try {
+      await invoke("sync_logout");
+    } catch (err) {
+      console.error("sync_logout failed", err);
+    }
+  });
+  syncNowBtn.addEventListener("click", async () => {
+    try {
+      await invoke("sync_now");
+    } catch (err) {
+      console.error("sync_now failed", err);
+    }
+  });
+
+  await listen<SyncStatus>("sync-status", (e) => {
+    if (e.payload) renderSyncStatus(e.payload);
+  });
+  try {
+    const st = await invoke<SyncStatus>("get_sync_status");
+    if (st) renderSyncStatus(st);
+  } catch (err) {
+    console.error("get_sync_status failed", err);
   }
 
   // 跨窗口同步：其它窗口改了设置 → 本页面也更新。

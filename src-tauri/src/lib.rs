@@ -2,6 +2,7 @@ mod clipboard;
 mod models;
 mod settings;
 mod source_app;
+mod sync;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -39,6 +40,15 @@ fn clamp_image_thumb_height(n: u32) -> u32 {
     n.clamp(14, 48)
 }
 
+/// 单条文本最大字符数合法化：0 表示不限制；否则夹到 [1000, 10_000_000]。
+fn clamp_max_text_length(n: u32) -> u32 {
+    if n == 0 {
+        0
+    } else {
+        n.clamp(1000, 10_000_000)
+    }
+}
+
 /// 托管的内部可变状态。
 struct Inner {
     history: Vec<ClipItem>,
@@ -59,6 +69,8 @@ struct Inner {
     icons: HashMap<String, String>,
     /// 窗口显示时记录的「前台来源 App」进程号；粘贴前据此把焦点还给它。
     prev_app_pid: Option<i32>,
+    /// 云同步的登录态与设备身份（独立于 Settings 持久化）。仅同步 worker 读写。
+    sync_auth: sync::SyncAuth,
 }
 
 /// 托管状态：主状态锁 + 来源 App 图标缓存（缓存自带独立锁，与主锁解耦）。
@@ -72,17 +84,38 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
+// ===================== 数据目录 =====================
+
+/// 自定义数据目录覆盖（None = 用系统默认 app_data_dir）。
+/// setup 时依设置初始化；change_data_dir / reset_data_dir 时更新。
+/// 所有数据文件（history/favorites/icons + images/）都经 effective_data_dir 解析，
+/// 这样切换目录后无需改动各处调用点。
+static DATA_DIR_OVERRIDE: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+
+/// 设置/清除自定义数据目录覆盖。
+pub fn set_data_dir_override(dir: Option<std::path::PathBuf>) {
+    if let Ok(mut g) = DATA_DIR_OVERRIDE.lock() {
+        *g = dir;
+    }
+}
+
+/// 解析当前生效的数据目录：优先自定义覆盖，否则系统默认 app_data_dir。
+/// 返回前确保目录已创建（失败也返回路径，由调用方的读写自行容错）。
+pub fn effective_data_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
+    let override_dir = DATA_DIR_OVERRIDE.lock().ok().and_then(|g| g.clone());
+    let dir = match override_dir {
+        Some(p) => p,
+        None => app.path().app_data_dir().ok()?,
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir)
+}
+
 // ===================== 历史持久化 =====================
 
-/// 历史持久化文件路径： app_data_dir()/history.json
+/// 历史持久化文件路径： <数据目录>/history.json
 fn history_path(app: &AppHandle) -> Option<std::path::PathBuf> {
-    match app.path().app_data_dir() {
-        Ok(dir) => {
-            let _ = std::fs::create_dir_all(&dir);
-            Some(dir.join("history.json"))
-        }
-        Err(_) => None,
-    }
+    Some(effective_data_dir(app)?.join("history.json"))
 }
 
 /// 从磁盘加载历史（不存在或失败则返回空）。
@@ -100,8 +133,16 @@ fn load_history(app: &AppHandle) -> Vec<ClipItem> {
                 if item.kind == "image" && item.hash.is_none() {
                     if let Some(p) = item.image_path.as_deref() {
                         if let Ok(png) = std::fs::read(p) {
-                            if let Some((hash, _thumb)) = clipboard::process_image(&png) {
+                            if let Some((hash, _thumb, w, h)) = clipboard::process_image(&png) {
                                 item.hash = Some(hash);
+                                // 回填旧数据缺失的宽高/大小。
+                                if item.width.is_none() {
+                                    item.width = Some(w);
+                                    item.height = Some(h);
+                                }
+                                if item.size.is_none() {
+                                    item.size = Some(png.len() as u64);
+                                }
                             }
                         }
                     }
@@ -125,15 +166,9 @@ fn save_history(app: &AppHandle, history: &[ClipItem]) {
 
 // ===================== 来源图标映射持久化 =====================
 
-/// 图标映射持久化文件路径： app_data_dir()/icons.json
+/// 图标映射持久化文件路径： <数据目录>/icons.json
 fn icons_path(app: &AppHandle) -> Option<std::path::PathBuf> {
-    match app.path().app_data_dir() {
-        Ok(dir) => {
-            let _ = std::fs::create_dir_all(&dir);
-            Some(dir.join("icons.json"))
-        }
-        Err(_) => None,
-    }
+    Some(effective_data_dir(app)?.join("icons.json"))
 }
 
 /// 从磁盘加载 `sourceApp -> dataURL` 图标映射（不存在或失败则返回空）。
@@ -232,25 +267,26 @@ fn commit(app: &AppHandle, snapshot: &[ClipItem], removed_paths: &[String]) {
 
 // ===================== 常用收藏持久化 =====================
 
-/// 常用持久化文件路径： app_data_dir()/favorites.json
+/// 常用持久化文件路径： <数据目录>/favorites.json
 fn favorites_path(app: &AppHandle) -> Option<std::path::PathBuf> {
-    match app.path().app_data_dir() {
-        Ok(dir) => {
-            let _ = std::fs::create_dir_all(&dir);
-            Some(dir.join("favorites.json"))
-        }
-        Err(_) => None,
-    }
+    Some(effective_data_dir(app)?.join("favorites.json"))
 }
 
-/// 为常用项补回图片 hash（重启后 #[serde(skip)] 的 hash 为 None）。
+/// 为常用项补回图片 hash（重启后 #[serde(skip)] 的 hash 为 None）+ 回填宽高/大小。
 fn rehash_fav_items(items: &mut [ClipItem]) {
     for item in items.iter_mut() {
         if item.kind == "image" && item.hash.is_none() {
             if let Some(p) = item.image_path.as_deref() {
                 if let Ok(png) = std::fs::read(p) {
-                    if let Some((hash, _thumb)) = clipboard::process_image(&png) {
+                    if let Some((hash, _thumb, w, h)) = clipboard::process_image(&png) {
                         item.hash = Some(hash);
+                        if item.width.is_none() {
+                            item.width = Some(w);
+                            item.height = Some(h);
+                        }
+                        if item.size.is_none() {
+                            item.size = Some(png.len() as u64);
+                        }
                     }
                 }
             }
@@ -328,6 +364,29 @@ fn get_history(state: State<'_, AppState>) -> Vec<ClipItem> {
         Ok(inner) => inner.history.clone(),
         Err(_) => Vec::new(),
     }
+}
+
+/// 读取指定图片项（历史或常用）的完整原图，返回 base64 data URL 供前端大图预览。
+/// `(async)`：读文件 + base64 可能较重，放独立线程避免卡主线程。
+#[tauri::command(async)]
+fn get_image_data_url(id: u64, state: State<'_, AppState>) -> Option<String> {
+    let path = {
+        let inner = state.0.lock().ok()?;
+        inner
+            .history
+            .iter()
+            .find(|it| it.id == id && it.kind == "image")
+            .and_then(|it| it.image_path.clone())
+            .or_else(|| {
+                inner
+                    .fav_groups
+                    .iter()
+                    .flat_map(|g| g.items.iter())
+                    .find(|it| it.id == id && it.kind == "image")
+                    .and_then(|it| it.image_path.clone())
+            })?
+    };
+    clipboard::read_image_data_url(&path)
 }
 
 /// 返回 `sourceApp -> 图标 dataURL` 映射。前端启动时拉取一次，
@@ -421,7 +480,8 @@ fn open_accessibility_settings() {
 #[cfg(not(target_os = "macos"))]
 fn open_accessibility_settings() {}
 
-/// 用 enigo 模拟一次 ⌘V（macOS 需「辅助功能」权限，未授权时静默失败）。
+/// 用 enigo 模拟一次 Ctrl/⌘+V（非 macOS 平台使用；macOS 走 `post_cmd_v_cgevent`）。
+#[cfg(not(target_os = "macos"))]
 fn simulate_cmd_v() {
     use enigo::{Direction, Enigo, Key, Keyboard, Settings as EnigoSettings};
     // 粘贴修饰键：macOS 用 ⌘(Meta)，Windows/Linux 用 Ctrl。
@@ -435,6 +495,78 @@ fn simulate_cmd_v() {
     let _ = enigo.key(modifier, Direction::Press);
     let _ = enigo.key(Key::Unicode('v'), Direction::Click);
     let _ = enigo.key(modifier, Direction::Release);
+}
+
+/// macOS 原生发送一次 ⌘V：直接构造并投递 CGEvent（数字键码 kVK_ANSI_V=0x09 + Command 修饰位）。
+/// 用数字键码不触碰 HIToolbox/TSM（enigo 崩的原因），因此**可在任意线程调用**，无需 run_on_main_thread。
+/// 这样 ⌘V 不再依赖「本 App 退到后台后被懒惰派发」的事件循环，消除点击后 1~2s 的粘贴延迟。
+#[cfg(target_os = "macos")]
+fn post_cmd_v_cgevent() {
+    use std::os::raw::c_void;
+    type CGEventSourceRef = *mut c_void;
+    type CGEventRef = *mut c_void;
+    const KVK_ANSI_V: u16 = 0x09;
+    const MASK_COMMAND: u64 = 0x0010_0000; // kCGEventFlagMaskCommand
+    const HID_EVENT_TAP: u32 = 0; // kCGHIDEventTap
+    const SOURCE_STATE_HID: i32 = 1; // kCGEventSourceStateHIDSystemState
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventSourceCreate(state_id: i32) -> CGEventSourceRef;
+        fn CGEventCreateKeyboardEvent(
+            source: CGEventSourceRef,
+            keycode: u16,
+            keydown: bool,
+        ) -> CGEventRef;
+        fn CGEventSetFlags(event: CGEventRef, flags: u64);
+        fn CGEventPost(tap: u32, event: CGEventRef);
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFRelease(cf: *const c_void);
+    }
+    unsafe {
+        let source = CGEventSourceCreate(SOURCE_STATE_HID);
+        let down = CGEventCreateKeyboardEvent(source, KVK_ANSI_V, true);
+        CGEventSetFlags(down, MASK_COMMAND);
+        CGEventPost(HID_EVENT_TAP, down);
+        let up = CGEventCreateKeyboardEvent(source, KVK_ANSI_V, false);
+        CGEventSetFlags(up, MASK_COMMAND);
+        CGEventPost(HID_EVENT_TAP, up);
+        if !down.is_null() {
+            CFRelease(down as *const c_void);
+        }
+        if !up.is_null() {
+            CFRelease(up as *const c_void);
+        }
+        if !source.is_null() {
+            CFRelease(source as *const c_void);
+        }
+    }
+}
+
+/// 统一的「还焦点给来源 App → 稍等 → 模拟 ⌘V」自动粘贴流程（历史项 / 常用项共用）。
+/// 调用前需已确认 `accessibility_trusted()`。
+fn fire_auto_paste(app: &AppHandle, prev_pid: Option<i32>) {
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        // 1. 先把焦点还给来源 App（AppKit 激活，须主线程）；此刻本 App 仍活跃，派发很快。
+        if let Some(pid) = prev_pid {
+            let _ = app2.run_on_main_thread(move || source_app::activate_pid(pid));
+        }
+        // 2. 等焦点切换到来源 App。
+        std::thread::sleep(Duration::from_millis(130));
+        // 3. 发 ⌘V。
+        #[cfg(target_os = "macos")]
+        {
+            // macOS：直接在本线程投递 CGEvent，不再走 run_on_main_thread（关键提速点）。
+            let _ = &app2;
+            post_cmd_v_cgevent();
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = app2.run_on_main_thread(simulate_cmd_v);
+        }
+    });
 }
 
 #[tauri::command]
@@ -466,19 +598,8 @@ fn paste_item(app: AppHandle, id: u64, state: State<'_, AppState>) {
 
     if paste_on_select {
         if accessibility_trusted() {
-            let app2 = app.clone();
             let prev_pid = state.0.lock().ok().and_then(|i| i.prev_app_pid);
-            std::thread::spawn(move || {
-                // 1. 先把焦点还给来源 App（在主线程激活），否则 ⌘V 落不到目标窗口。
-                if let Some(pid) = prev_pid {
-                    let _ = app2.run_on_main_thread(move || source_app::activate_pid(pid));
-                }
-                // 2. 等焦点切换完成后，在主线程发送 ⌘V。
-                //    enigo 解析键码会调用 HIToolbox/TSM，这些 API 必须在主线程，
-                //    否则触发 dispatch_assert_queue 断言导致 SIGTRAP 崩溃。
-                std::thread::sleep(Duration::from_millis(130));
-                let _ = app2.run_on_main_thread(simulate_cmd_v);
-            });
+            fire_auto_paste(&app, prev_pid);
         } else {
             // 未授权辅助功能：内容已写入剪贴板，但无法模拟粘贴。打开设置引导授权。
             let _ = app.emit("need-accessibility", ());
@@ -618,6 +739,142 @@ fn add_favorite(app: AppHandle, id: u64, group_id: u64, state: State<'_, AppStat
             }
         }
         inner.fav_groups[gpos].items.insert(0, fav);
+        inner.fav_groups.clone()
+    };
+    commit_favorites(&app, &snapshot);
+}
+
+/// 手动新建一条「文本」常用记录到指定分组（组内相同文本去重；组不存在回退第一个组）。
+#[tauri::command]
+fn add_fav_text(app: AppHandle, text: String, group_id: u64, state: State<'_, AppState>) {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return;
+    }
+    let snapshot = {
+        let Ok(mut inner) = state.0.lock() else {
+            return;
+        };
+        let gpos = match inner.fav_groups.iter().position(|g| g.id == group_id) {
+            Some(p) => p,
+            None if !inner.fav_groups.is_empty() => 0,
+            None => return,
+        };
+        let candidate = ClipItem {
+            id: 0,
+            kind: "text".to_string(),
+            text: Some(text),
+            files: None,
+            thumbnail: None,
+            image_path: None,
+            width: None,
+            height: None,
+            size: None,
+            timestamp: now_millis(),
+            pinned: false,
+            source_app: None,
+            source_icon: None,
+            hash: None,
+        };
+        // 组内已有相同文本则忽略。
+        if inner.fav_groups[gpos]
+            .items
+            .iter()
+            .any(|f| same_content(f, &candidate))
+        {
+            return;
+        }
+        let new_id = inner.next_id;
+        inner.next_id += 1;
+        let mut fav = candidate;
+        fav.id = new_id;
+        inner.fav_groups[gpos].items.insert(0, fav);
+        inner.fav_groups.clone()
+    };
+    commit_favorites(&app, &snapshot);
+}
+
+/// 切换某常用项的置顶（id 为常用项 id，跨所有分组查找）。置顶排序由前端渲染时处理。
+#[tauri::command]
+fn toggle_fav_pin(app: AppHandle, id: u64, state: State<'_, AppState>) {
+    let snapshot = {
+        let Ok(mut inner) = state.0.lock() else {
+            return;
+        };
+        let mut found = false;
+        for g in inner.fav_groups.iter_mut() {
+            if let Some(it) = g.items.iter_mut().find(|it| it.id == id) {
+                it.pinned = !it.pinned;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return;
+        }
+        inner.fav_groups.clone()
+    };
+    commit_favorites(&app, &snapshot);
+}
+
+/// 常用项用于排序/展示的文本键。
+fn fav_sort_text(it: &ClipItem) -> String {
+    match it.kind.as_str() {
+        "text" => it.text.clone().unwrap_or_default(),
+        "files" => it.files.clone().unwrap_or_default().join(" "),
+        _ => "图片".to_string(),
+    }
+}
+
+/// 按前端给定的 id 顺序重排某分组的常用项（拖拽手动排序）。未列出的项保持原序追加到末尾。
+#[tauri::command]
+fn reorder_favorites(app: AppHandle, group_id: u64, ordered_ids: Vec<u64>, state: State<'_, AppState>) {
+    let snapshot = {
+        let Ok(mut inner) = state.0.lock() else {
+            return;
+        };
+        let Some(g) = inner.fav_groups.iter_mut().find(|g| g.id == group_id) else {
+            return;
+        };
+        let mut items = std::mem::take(&mut g.items);
+        let mut newv = Vec::with_capacity(items.len());
+        for id in &ordered_ids {
+            if let Some(pos) = items.iter().position(|it| it.id == *id) {
+                newv.push(items.remove(pos));
+            }
+        }
+        newv.append(&mut items); // 剩余未列出的保持原序追加
+        g.items = newv;
+        inner.fav_groups.clone()
+    };
+    commit_favorites(&app, &snapshot);
+}
+
+/// 按规则排序某分组的常用项：by = "time"(加入时间倒序) | "text"(字母) | "kind"(类型)。
+#[tauri::command]
+fn sort_favorites(app: AppHandle, group_id: u64, by: String, state: State<'_, AppState>) {
+    let snapshot = {
+        let Ok(mut inner) = state.0.lock() else {
+            return;
+        };
+        let Some(g) = inner.fav_groups.iter_mut().find(|g| g.id == group_id) else {
+            return;
+        };
+        match by.as_str() {
+            "time" => g.items.sort_by(|a, b| b.timestamp.cmp(&a.timestamp)),
+            "kind" => g.items.sort_by(|a, b| {
+                a.kind.cmp(&b.kind).then_with(|| {
+                    fav_sort_text(a)
+                        .to_lowercase()
+                        .cmp(&fav_sort_text(b).to_lowercase())
+                })
+            }),
+            _ => g.items.sort_by(|a, b| {
+                fav_sort_text(a)
+                    .to_lowercase()
+                    .cmp(&fav_sort_text(b).to_lowercase())
+            }),
+        }
         inner.fav_groups.clone()
     };
     commit_favorites(&app, &snapshot);
@@ -797,16 +1054,8 @@ fn paste_favorite(app: AppHandle, id: u64, state: State<'_, AppState>) {
 
     if paste_on_select {
         if accessibility_trusted() {
-            let app2 = app.clone();
             let prev_pid = state.0.lock().ok().and_then(|i| i.prev_app_pid);
-            std::thread::spawn(move || {
-                if let Some(pid) = prev_pid {
-                    let _ = app2.run_on_main_thread(move || source_app::activate_pid(pid));
-                }
-                // ⌘V 模拟必须在主线程（enigo 解析键码会调 HIToolbox/TSM，否则崩溃）。
-                std::thread::sleep(Duration::from_millis(130));
-                let _ = app2.run_on_main_thread(simulate_cmd_v);
-            });
+            fire_auto_paste(&app, prev_pid);
         } else {
             let _ = app.emit("need-accessibility", ());
             open_accessibility_settings();
@@ -830,6 +1079,10 @@ fn set_settings(app: AppHandle, mut settings: Settings, state: State<'_, AppStat
     let Some(old) = state.0.lock().ok().map(|i| i.settings.clone()) else {
         return;
     };
+
+    // data_dir 只能经 change_data_dir / reset_data_dir 变更（含数据迁移+重载）；
+    // 通用设置保存永远沿用旧值，避免前端整包回传时误改数据目录。
+    settings.data_dir = old.data_dir.clone();
 
     // 快捷键变更 → 注销旧的、注册新的；新快捷键注册失败时回退，
     // 保证任何时刻都有一个可用的全局快捷键，并把实际生效的值写回 settings。
@@ -906,6 +1159,8 @@ fn set_settings(app: AppHandle, mut settings: Settings, state: State<'_, AppStat
     settings.history_size = clamp_history_size(settings.history_size);
     // 图片缩略图高度合法化。
     settings.image_thumb_height = clamp_image_thumb_height(settings.image_thumb_height);
+    // 单条文本最大长度合法化。
+    settings.max_text_length = clamp_max_text_length(settings.max_text_length);
     // 历史上限或置顶项位置变化 → 需要重排/截断。
     let resort_needed = old.history_size != settings.history_size
         || old.pinned_position != settings.pinned_position;
@@ -943,6 +1198,295 @@ fn set_settings(app: AppHandle, mut settings: Settings, state: State<'_, AppStat
     if let Some((snapshot, removed)) = truncate_result {
         commit(&app, &snapshot, &removed);
     }
+}
+
+// ===================== 数据目录 / 导入导出 命令 =====================
+
+/// 返回当前生效的数据目录绝对路径（自定义或系统默认），供设置页展示。
+#[tauri::command]
+fn get_data_dir(app: AppHandle) -> String {
+    effective_data_dir(&app)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+/// 弹出系统「选择文件夹」对话框，返回选中目录（取消返回 None）。
+/// 必须 `(async)`：blocking 对话框会派发到主线程并阻塞等待，若命令本身
+/// 在主线程执行（同步命令的默认行为）会死锁。标 async 令其在独立线程跑。
+#[tauri::command(async)]
+fn pick_data_dir(app: AppHandle) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    let fp = app.dialog().file().blocking_pick_folder()?;
+    fp.into_path().ok().map(|pb| pb.to_string_lossy().to_string())
+}
+
+/// 切换数据目录并迁移现有数据。target=None 表示恢复系统默认目录。
+///
+/// 迁移规则：把当前目录的 history/favorites/icons.json 与 images/ 复制到目标目录，
+/// 但**只在目标目录尚无同名文件时复制**（这样把目录指向另一台机器已有的数据文件夹时，
+/// 直接加载对方数据而不覆盖）。随后把图片项的绝对路径从旧 images/ 重写到新 images/，
+/// 使新目录自包含；旧目录原样保留作为备份、不删除。
+fn switch_data_dir(app: &AppHandle, target: Option<std::path::PathBuf>) -> Result<String, String> {
+    let is_default = target.is_none();
+    // 解析目标目录（None=系统默认）。
+    let new_path = match target {
+        Some(p) => p,
+        None => app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("无法定位默认目录: {e}"))?,
+    };
+    std::fs::create_dir_all(&new_path).map_err(|e| format!("无法创建目录: {e}"))?;
+    // 写权限探测。
+    let probe = new_path.join(".sjz_copy_write_test");
+    std::fs::write(&probe, b"ok").map_err(|e| format!("目录不可写: {e}"))?;
+    let _ = std::fs::remove_file(&probe);
+
+    let old_path = effective_data_dir(app).ok_or_else(|| "无法解析当前目录".to_string())?;
+    let old_canon = std::fs::canonicalize(&old_path).unwrap_or_else(|_| old_path.clone());
+    let new_canon = std::fs::canonicalize(&new_path).unwrap_or_else(|_| new_path.clone());
+
+    // 目录未变 → 仅确保覆盖与设置一致后返回。
+    if old_canon == new_canon {
+        return Ok(new_path.to_string_lossy().to_string());
+    }
+
+    // 迁移 images/（先于 json，供随后重写路径引用）。
+    let old_images = old_path.join("images");
+    let new_images = new_path.join("images");
+    let _ = std::fs::create_dir_all(&new_images);
+    if old_images.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&old_images) {
+            for e in entries.flatten() {
+                let from = e.path();
+                if from.is_file() {
+                    if let Some(name) = from.file_name() {
+                        let to = new_images.join(name);
+                        if !to.exists() {
+                            let _ = std::fs::copy(&from, &to);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 迁移三个 json（仅当目标不存在时复制）。
+    for name in ["history.json", "favorites.json", "icons.json"] {
+        let from = old_path.join(name);
+        let to = new_path.join(name);
+        if from.is_file() && !to.exists() {
+            let _ = std::fs::copy(&from, &to);
+        }
+    }
+
+    // 切换覆盖 → 之后所有路径解析走新目录。
+    set_data_dir_override(target_override(&new_path, app));
+
+    // 从新目录重载，并把图片绝对路径由旧 images/ 重写到新 images/。
+    let mut history = load_history(app);
+    let (mut fav_groups, _legacy) = load_fav_groups(app);
+    let icons = load_icons(app);
+    let old_images_str = old_images.to_string_lossy().to_string();
+    let new_images_str = new_images.to_string_lossy().to_string();
+    let rewrite = |item: &mut ClipItem| {
+        if let Some(p) = item.image_path.as_ref() {
+            if p.starts_with(&old_images_str) {
+                item.image_path = Some(p.replacen(&old_images_str, &new_images_str, 1));
+            }
+        }
+    };
+    for it in history.iter_mut() {
+        rewrite(it);
+    }
+    for g in fav_groups.iter_mut() {
+        for it in g.items.iter_mut() {
+            rewrite(it);
+        }
+    }
+    if fav_groups.is_empty() {
+        fav_groups.push(FavGroup {
+            id: 0,
+            name: "默认".to_string(),
+            items: Vec::new(),
+        });
+    }
+
+    // 落盘到新目录。
+    save_history(app, &history);
+    save_favorites(app, &fav_groups);
+    save_icons(app, &icons);
+
+    // 写回内存状态 + 持久化 data_dir + 广播刷新（主窗口据此重渲染）。
+    let new_dir_str = new_path.to_string_lossy().to_string();
+    let new_settings = {
+        let state = app.state::<AppState>();
+        let mut inner = state.0.lock().map_err(|_| "状态锁失败".to_string())?;
+        inner.history = history.clone();
+        inner.fav_groups = fav_groups.clone();
+        inner.icons = icons.clone();
+        inner.settings.data_dir = if is_default { String::new() } else { new_dir_str.clone() };
+        inner.settings.clone()
+    };
+    settings::save_settings(app, &new_settings);
+
+    let _ = app.emit("history-updated", &history);
+    let _ = app.emit("favorites-updated", &fav_groups);
+    let _ = app.emit("icons-updated", &icons);
+    let _ = app.emit("settings-updated", &new_settings);
+
+    Ok(new_dir_str)
+}
+
+/// 计算切到默认目录时是否应清空覆盖：若新目录恰为系统默认，则覆盖设 None
+/// （让其继续跟随系统默认目录），否则设为具体路径。
+fn target_override(new_path: &std::path::Path, app: &AppHandle) -> Option<std::path::PathBuf> {
+    if let Ok(def) = app.path().app_data_dir() {
+        let a = std::fs::canonicalize(new_path).unwrap_or_else(|_| new_path.to_path_buf());
+        let b = std::fs::canonicalize(&def).unwrap_or(def);
+        if a == b {
+            return None;
+        }
+    }
+    Some(new_path.to_path_buf())
+}
+
+/// 设置自定义数据存储目录（迁移现有数据），返回生效路径。
+/// `(async)`：迁移涉及大量文件拷贝，放独立线程避免卡住主线程 UI。
+#[tauri::command(async)]
+fn change_data_dir(app: AppHandle, new_dir: String) -> Result<String, String> {
+    let trimmed = new_dir.trim();
+    if trimmed.is_empty() {
+        return Err("目录为空".to_string());
+    }
+    switch_data_dir(&app, Some(std::path::PathBuf::from(trimmed)))
+}
+
+/// 恢复默认数据存储目录（迁移现有数据回默认目录），返回生效路径。
+#[tauri::command(async)]
+fn reset_data_dir(app: AppHandle) -> Result<String, String> {
+    switch_data_dir(&app, None)
+}
+
+/// 导出「常用」全部分组为 JSON 文件。返回写入路径（取消返回 None）。
+#[tauri::command(async)]
+fn export_favorites(app: AppHandle, state: State<'_, AppState>) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let groups = state
+        .0
+        .lock()
+        .map_err(|_| "状态锁失败".to_string())?
+        .fav_groups
+        .clone();
+    let json = serde_json::to_string_pretty(&groups).map_err(|e| e.to_string())?;
+    let Some(fp) = app
+        .dialog()
+        .file()
+        .set_file_name("常用备份.json")
+        .add_filter("JSON", &["json"])
+        .blocking_save_file()
+    else {
+        return Ok(None); // 用户取消
+    };
+    let path = fp.into_path().map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| format!("写入失败: {e}"))?;
+    Ok(Some(path.to_string_lossy().to_string()))
+}
+
+/// 从 JSON 文件导入「常用」。mode="replace" 覆盖全部；否则合并
+/// （同名分组内按内容去重追加，其余作为新分组）。返回结果描述（取消返回 None）。
+#[tauri::command(async)]
+fn import_favorites(
+    app: AppHandle,
+    mode: String,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let Some(fp) = app
+        .dialog()
+        .file()
+        .add_filter("JSON", &["json"])
+        .blocking_pick_file()
+    else {
+        return Ok(None); // 用户取消
+    };
+    let path = fp.into_path().map_err(|e| e.to_string())?;
+    let content = std::fs::read_to_string(&path).map_err(|e| format!("读取失败: {e}"))?;
+
+    // 兼容两种：分组格式 Vec<FavGroup> 或 扁平 Vec<ClipItem>（包进「导入」组）。
+    let mut imported: Vec<FavGroup> = if let Ok(g) = serde_json::from_str::<Vec<FavGroup>>(&content) {
+        g
+    } else if let Ok(flat) = serde_json::from_str::<Vec<ClipItem>>(&content) {
+        vec![FavGroup {
+            id: 0,
+            name: "导入".to_string(),
+            items: flat,
+        }]
+    } else {
+        return Err("文件格式不对（需要「常用备份」JSON）".to_string());
+    };
+    for g in imported.iter_mut() {
+        rehash_fav_items(&mut g.items);
+    }
+
+    let replace = mode == "replace";
+    let (snapshot, added_groups, added_items) = {
+        let mut inner = state.0.lock().map_err(|_| "状态锁失败".to_string())?;
+        let mut next = inner.next_id;
+        let mut added_g = 0usize;
+        let mut added_i = 0usize;
+        if replace {
+            inner.fav_groups.clear();
+        }
+        for imp in imported.iter_mut() {
+            match inner.fav_groups.iter().position(|g| g.name == imp.name) {
+                Some(idx) => {
+                    for mut it in imp.items.drain(..) {
+                        let dup = inner.fav_groups[idx]
+                            .items
+                            .iter()
+                            .any(|e| same_content(e, &it));
+                        if !dup {
+                            it.id = next;
+                            next += 1;
+                            inner.fav_groups[idx].items.push(it);
+                            added_i += 1;
+                        }
+                    }
+                }
+                None => {
+                    let mut g = FavGroup {
+                        id: next,
+                        name: imp.name.clone(),
+                        items: Vec::new(),
+                    };
+                    next += 1;
+                    for mut it in imp.items.drain(..) {
+                        it.id = next;
+                        next += 1;
+                        g.items.push(it);
+                        added_i += 1;
+                    }
+                    inner.fav_groups.push(g);
+                    added_g += 1;
+                }
+            }
+        }
+        // 始终保证至少 1 个分组。
+        if inner.fav_groups.is_empty() {
+            inner.fav_groups.push(FavGroup {
+                id: next,
+                name: "默认".to_string(),
+                items: Vec::new(),
+            });
+            next += 1;
+        }
+        inner.next_id = next;
+        (inner.fav_groups.clone(), added_g, added_i)
+    };
+    commit_favorites(&app, &snapshot);
+    Ok(Some(format!(
+        "导入完成：新增 {added_groups} 个分组、{added_items} 条"
+    )))
 }
 
 // ===================== 窗口与轮询 =====================
@@ -1057,6 +1601,17 @@ fn poll_clipboard_once(app: &AppHandle, state: &AppState) {
 }
 
 fn record_text(app: &AppHandle, state: &AppState, text: String) {
+    // 超长文本不记录：避免超大字符串进历史后每次全量 IPC 重发 + 前端渲染/搜索卡死。
+    // 上限来自设置（0=不限制）；源 App 里的粘贴不受影响，只是不进历史。
+    let max_len = state
+        .0
+        .lock()
+        .ok()
+        .map(|i| i.settings.max_text_length)
+        .unwrap_or(0);
+    if max_len > 0 && text.chars().count() > max_len as usize {
+        return;
+    }
     let sig = format!("t:{text}");
     // 快速去重：内容未变（或锁不可用）则直接跳过，避免每轮都去查前台 App。
     if state
@@ -1108,6 +1663,9 @@ fn record_text(app: &AppHandle, state: &AppState, text: String) {
                     files: None,
                     thumbnail: None,
                     image_path: None,
+                    width: None,
+                    height: None,
+                    size: None,
                     timestamp: now_millis(),
                     pinned: false,
                     source_app: src_app,
@@ -1179,6 +1737,9 @@ fn record_files(app: &AppHandle, state: &AppState, files: Vec<String>) {
                     files: Some(files),
                     thumbnail: None,
                     image_path: None,
+                    width: None,
+                    height: None,
+                    size: None,
                     timestamp: now_millis(),
                     pinned: false,
                     source_app: src_app,
@@ -1202,10 +1763,11 @@ fn record_files(app: &AppHandle, state: &AppState, files: Vec<String>) {
 }
 
 fn record_image(app: &AppHandle, state: &AppState, png: Vec<u8>) {
-    // 解码、计算稳定哈希与缩略图（在锁外做较重的处理）。
-    let Some((hash, thumbnail)) = clipboard::process_image(&png) else {
+    // 解码、计算稳定哈希与缩略图 + 宽高（在锁外做较重的处理）。
+    let Some((hash, thumbnail, img_w, img_h)) = clipboard::process_image(&png) else {
         return;
     };
+    let img_size = png.len() as u64;
     let sig = format!("i:{hash}");
 
     // 快速去重：内容未变（或锁不可用）则跳过，避免每轮都去查前台 App。
@@ -1256,6 +1818,9 @@ fn record_image(app: &AppHandle, state: &AppState, png: Vec<u8>) {
                     files: None,
                     thumbnail: Some(thumbnail),
                     image_path,
+                    width: Some(img_w),
+                    height: Some(img_h),
+                    size: Some(img_size),
                     timestamp: now_millis(),
                     pinned: false,
                     source_app: src_app,
@@ -1294,6 +1859,7 @@ fn open_settings(app: AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             None,
@@ -1345,7 +1911,20 @@ pub fn run() {
             app_settings.history_size = clamp_history_size(app_settings.history_size);
             app_settings.window_height = clamp_window_height(app_settings.window_height);
             app_settings.image_thumb_height = clamp_image_thumb_height(app_settings.image_thumb_height);
+            app_settings.max_text_length = clamp_max_text_length(app_settings.max_text_length);
             let win_height = app_settings.window_height;
+
+            // 自定义数据目录：非空且可创建则设为覆盖（history/favorites/icons/images
+            // 随后都从这里读写）。目录不可用则回退默认并清空该设置，避免数据落空。
+            if !app_settings.data_dir.trim().is_empty() {
+                let p = std::path::PathBuf::from(app_settings.data_dir.trim());
+                if std::fs::create_dir_all(&p).is_ok() {
+                    set_data_dir_override(Some(p));
+                } else {
+                    app_settings.data_dir = String::new();
+                }
+            }
+
             let mut history = load_history(&handle);
             let (mut fav_groups, fav_legacy) = load_fav_groups(&handle);
 
@@ -1426,6 +2005,7 @@ pub fn run() {
                 }
             }
 
+            let sync_auth = sync::load_auth(app.handle());
             app.manage(AppState(
                 Mutex::new(Inner {
                     history,
@@ -1435,9 +2015,14 @@ pub fn run() {
                     settings: app_settings,
                     icons,
                     prev_app_pid: None,
+                    sync_auth,
                 }),
                 source_app::IconCache::new(),
             ));
+
+            // 云同步 worker（独立线程，与核心路径完全隔离；关闭开关时零联网）。
+            let sync_handle = sync::start(app.handle());
+            app.manage(sync_handle);
 
             // 应用设置中的主窗口高度（覆盖 tauri.conf 默认值）。
             if let Some(win) = app.get_webview_window("main") {
@@ -1531,6 +2116,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_history,
             get_icons,
+            get_image_data_url,
             copy_item,
             paste_item,
             toggle_pin,
@@ -1539,6 +2125,10 @@ pub fn run() {
             hide_window,
             get_favorites,
             add_favorite,
+            add_fav_text,
+            toggle_fav_pin,
+            reorder_favorites,
+            sort_favorites,
             remove_favorite,
             paste_favorite,
             add_group,
@@ -1546,7 +2136,18 @@ pub fn run() {
             delete_group,
             get_settings,
             set_settings,
-            open_settings
+            open_settings,
+            get_data_dir,
+            pick_data_dir,
+            change_data_dir,
+            reset_data_dir,
+            export_favorites,
+            import_favorites,
+            sync::sync_login,
+            sync::sync_register,
+            sync::sync_logout,
+            sync::sync_now,
+            sync::get_sync_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

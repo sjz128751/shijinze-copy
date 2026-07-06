@@ -29,6 +29,10 @@
   - 开机自启：`tauri-plugin-autostart`
   - 全局快捷键：`tauri-plugin-global-shortcut`
 
+### 相关文档
+- 本地各平台运行/编译/打包命令 + 关键名字：[`本地运行与打包.md`](./本地运行与打包.md)
+- GitHub 云端自动打包（Win + Mac）流程：[`GitHub构建流程.md`](./GitHub构建流程.md)
+
 ### 常用命令
 > 每个新终端先 `source "$HOME/.cargo/env"`（cargo 不在默认 PATH）。
 
@@ -122,6 +126,11 @@ npm run tauri build        # 打正式包（签名后的 .app + .dmg）
 - [x] 打包签名 dmg（aarch64）
 - [x] **Windows 跨平台支持**：粘贴 Ctrl+V、默认快捷键 Ctrl+Shift+V、亚克力磨砂背景、skipTaskbar；macOS 专属代码已 cfg 隔离
 - [x] **GitHub Actions CI**：`.github/workflows/build-windows.yml`，云端 Windows runner 出 `.msi`/`.exe`
+- [x] **可选云同步（2026-07）**：设置里「🔄 同步」Tab 配同步密钥 + 开关 + 登录/注册（复用 admin-web `app_user` 账号，`/sjzApp/clip/register` 注册即自动登录）。当前加密统一用内置固定密钥 `Shijinze123`（用户密钥字段保留待后用）。默认走内置后端 `copy.nihaoiii.fun:80`；勾「自建服务器」才显示并使用自填 IP/端口。关闭「开启云同步」时下方全部置灰。登录后独立线程周期性把本地历史 **AES-256-GCM 端到端加密**上传到 admin-web、并拉取合并另一台机器的历史（服务端只存密文、解不开）。**完全隔离旁路**：关闭开关或服务器不可达时零联网、绝不影响单机运行。客户端 `src-tauri/src/sync.rs`；服务端 `com.xiliu.myfunction.clipboard`（`/sjzApp/clip/{login,push,pull,heartbeat}`）。首版只同步 text/files（不含图片）。
+- [x] **剪切板使用统计后台（2026-07）**：App 运行+登录时每 5 分钟发心跳；后台页 `/clipstat.html`（软件管理目录，`tool:clipstat`）看设备数/活跃数/用户数/条目数。
+- [x] **自定义数据存储位置（2026-07-05）**：设置→存储 Tab 可「选择目录/恢复默认」。所有数据文件（history/favorites/icons.json + images/）统一经 `effective_data_dir` 解析，由全局 `DATA_DIR_OVERRIDE` 决定（空=系统默认 `app_data_dir`）；`settings.data_dir` 持久化。切换时把现有数据迁移到新目录（**新目录已有同名文件则不覆盖**，便于指向已有数据文件夹），并把图片项绝对路径从旧 `images/` 重写到新 `images/` 使新目录自包含，旧目录保留作备份不删。命令 `get_data_dir/pick_data_dir/change_data_dir/reset_data_dir`（对话框走 `tauri-plugin-dialog` 的 blocking API，纯 Rust 侧，前端不加 npm 依赖）。`set_settings` 里 `data_dir` 被锁定为旧值，只能经专用命令改。
+- [x] **常用数据导入/导出（2026-07-05）**：设置→存储 Tab「导出 / 合并导入 / 替换导入」。导出把 `Vec<FavGroup>` 写成 JSON；导入兼容分组格式与旧扁平格式，合并时同名分组内按 `same_content` 去重追加、其余作新分组（重新分配 id），替换先清空（前端二次确认）。命令 `export_favorites/import_favorites`。首版图片项仅带缩略图 base64+旧绝对路径，跨机导入图片不保证可用；text/files 完全可移植。
+- [x] **常用交互增强（2026-07-05）**：① 分组标签条横向溢出时，竖直鼠标滚轮转左右滚动（`#fav-tabs` 的 `wheel`→`scrollLeft`）；② 常用列表空白处右键「新建常用记录」→ 顶部内联输入框回车保存一条文本常用（命令 `add_fav_text(text, groupId)`，组内去重；输入框 keydown 必须 `stopPropagation` 否则被全局键盘导航截走）。
 
 ---
 
@@ -134,6 +143,9 @@ npm run tauri build        # 打正式包（签名后的 .app + .dmg）
 - [ ] 出 Intel(x86_64) 或 universal 包（现仅 Apple Silicon）
 - [ ] 图标负缓存（来源 App 图标取不到时避免每次重试转换）
 - [ ] vibrancy 失败兜底（旧系统/私有 API 变动时给不透明背景，避免透明穿透）
+- [ ] 云同步：支持图片类型（需上传 PNG 字节 + 对端重建 image_path）
+- [ ] 云同步：跨机删除/取消置顶的传播（当前是追加式并集，删除仅本机生效）
+- [ ] 云同步：同步密钥/登录 token 目前明文存本地（settings.json / sync_auth.json），考虑接系统 keychain
 
 ---
 
@@ -152,6 +164,13 @@ npm run tauri build        # 打正式包（签名后的 .app + .dmg）
 - ✅ 2026-06 | 快捷键显示 `CmdOrCtrl` | 录制器把 Meta/Ctrl 统一映射成跨平台别名 | 录制改具体键（Meta→`Cmd`、Ctrl→`Ctrl`）；后端加载时迁移老值 `CmdOrCtrl→Cmd`
 - ✅ 2026-06 | 弹窗底部沉到 Dock 后面、最后几条看不到 | `position_at_cursor` 只夹紧到整块屏幕（含 Dock 区域） | 夹紧时预留顶部菜单栏(~28pt)与底部 Dock(~96pt)边距（按 `scale_factor` 换算）。**注**：96pt 是经验值，Dock 放大/超大时可能仍偏差；如需精确可用 NSScreen `visibleFrame`
 - ✅ 2026-06 | `for v in /Volumes/clipboard*` 让整条打包命令中断 | zsh 在 glob 无匹配时报 `no matches found` 并中断 | 卸载卷用具体名：`hdiutil detach "/Volumes/clipboard-manager" -force 2>/dev/null || true`
+- ✅ 2026-07-05 | `tauri build` 打 dmg 又失败 `bundle_dmg.sh`，但卷名不是 `shijinze-copy` 也不是 `clipboard-manager` | 上一次 dmg 打包**失败**会残留一个**随机名**临时卷 `/Volumes/dmg.XXXXXX`（rw.*.dmg），按固定名 detach 匹配不到 | 用 `hdiutil info` 找到 `image-path` 指向本项目 `bundle/macos/rw.*.dmg` 的那个 disk，`hdiutil detach /Volumes/dmg.XXXX -force` 卸载并 `rm -f bundle/macos/rw.*.dmg`，再重打
+- ✅ 2026-07-03 | 刚呼出窗口时**历史列表空白**（连占位图标都没有），要手动滚一下才出现（右侧短列表「常用」不受影响） | **超一屏的 overflow 滚动容器 `#list` 在窗口显示时 WKWebView 不给它光栅化**，非得一次真实滚动位移才触发（跟内容何时渲染无关；短列表不足一屏所以没事）。走过弯路：translateZ 对长列表无效、display 开关+重拉数据更糟且卡 | ①`onWindowShown` 默认不重建 DOM；② `kickListPaint()` 只给 `#list` 补一次真实 2px 滚动位移（下一帧复位，非同帧来回）、在 rAF/100ms/250ms 各一发。详见踩坑记录`前端与窗口.md`（`src/main.ts`）
+- ✅ 2026-07-03 | 弹出时选中不稳定落第 1 行，跑到光标压住的中间行 | 弹窗出现在光标处、光标压住中间行 → 系统派发「原地」mousemove 抢选中；且程序化滚动（scrollTop=0/kickListPaint）误触发 `selectUnderPointer` 跟随光标 | 加 `programmaticScrolls` 守卫程序化滚动 + `pointerArmed`/`pointerBaseline`「鼠标真移动过」判定：弹出先锁第 0 行，位移>2px 才 arm 跟随光标
+- ✅ 2026-07-03 | 云同步登录：admin 账号登不进 | admin 是后台 `sys_user`，剪切板同步复用移动端 `app_user`（两套独立账号体系）| 用 app_user 账号登录（同安卓 App）；没有则 `/sjzApp/user/register` 注册。详见踩坑记录 `云同步.md`
+- ✅ 2026-07-03 | 云同步编译 `E0034 new_from_slice 冲突` | 同时 use 了 aes-gcm `KeyInit` 与 hmac `Mac`，都有 `new_from_slice` | 全限定 `<HmacSha256 as Mac>::new_from_slice(key)`
+- ✅ 2026-07-06 | 自动粘贴慢：点击后隔 1~2s 才 ⌘V、时快时慢 | 旧实现在后台线程 `sleep(130ms)` 后用 `run_on_main_thread(simulate_cmd_v)` 发 ⌘V；但此时本 App 已隐藏窗口+还焦点给来源 App、退成后台 Accessory 应用，其事件循环被系统懒惰派发，排队的闭包滞留最多 ~1~2s。（走主线程是因 enigo 解析键码调 HIToolbox/TSM 只能主线程）| macOS 改直接投递 CGEvent（`post_cmd_v_cgevent`：数字键码 kVK_ANSI_V=0x09 + Command 修饰位 + `CGEventPost`，裸 FFI 链 CoreGraphics/CoreFoundation，无新依赖）——数字键码不碰 HIToolbox/TSM，可任意线程调用，⌘V 直接在 worker 线程发，不再等本 App 后台事件循环 → 延迟回到 ~130ms。两处粘贴收敛到 `fire_auto_paste()`；enigo 仅非 macOS 保留。详见踩坑记录 `Rust后端.md`
+- ✅ 2026-07-05 | 加「选择数据目录」后点按钮 App 卡死/被强退（exit 144） | tauri-plugin-dialog 的 `blocking_pick_folder/pick_file/save_file` 会把原生对话框派发到**主线程**再阻塞等待；而 Tauri v2 **同步命令默认就在主线程执行** → 主线程自己等自己，死锁 | 开对话框的命令改标 `#[tauri::command(async)]`（令其在独立线程跑），主线程才能处理对话框事件。顺带把做大量文件拷贝的 `change_data_dir/reset_data_dir` 也标 async 避免卡 UI
 
 ---
 
@@ -159,9 +178,24 @@ npm run tauri build        # 打正式包（签名后的 .app + .dmg）
 
 > 每次开发结束更新这里。
 
-**最近更新：2026-06-30**
+**最近更新：2026-07-05**
 
+- **本次完成**：① 换新剪贴板 App 图标（青绿→海蓝渐变 + 白板 + 琥珀夹子 + 叠卡，源 `src-tauri/icons/icon-source.svg` → `npx tauri icon` 出全套）；② 自定义数据存储位置（`effective_data_dir` + `DATA_DIR_OVERRIDE`，迁移+图片路径重写）；③ 常用导入/导出（`export_favorites`/`import_favorites`）。新增依赖 `tauri-plugin-dialog`（Rust blocking 对话框，前端零新依赖）。
+- **验证**：`cargo check` 与 `npm run build` 全绿。**尚未真机手测**目录切换/导入导出的实际 UI 流程与图片迁移，也**未重新打包 dmg**。
+- **下次从这里开始**：真机验证「选择目录→迁移→重启后仍读新目录」「导出→替换导入→合并导入」全流程（尤其含图片项时旧绝对路径重写是否生效）；无误后重新打 dmg。
+
+---
+
+**2026-07-03 存档**
+
+- **本次完成：可选云同步 + 后台使用统计**（跨 admin-web 两端）。
+  - 客户端：`src-tauri/src/sync.rs`（独立 worker 线程 + AES-256-GCM 端到端加密 + HMAC 去重 + 心跳）；`models.rs` 加 4 个同步 Settings 字段；`lib.rs` 接线（Inner 加 `sync_auth`、setup 启 worker、注册 4 命令）；设置窗口加「🔄 同步」Tab。新增依赖 reqwest(纯HTTP,无TLS)/aes-gcm/sha2/hmac/rand。
+  - 服务端：`com.xiliu.myfunction.clipboard`（2 实体 + 2 Mapper + 2 Service + 2 Controller）；建表数组、ToolAuthFilter 规则、菜单初始化三处已登记；后台页 `static/clipstat.html`。
+  - **验证**：三端编译全绿；后端 `mvn spring-boot:run` 起来后 curl 跑通 login/push/pull/heartbeat + 统计页鉴权拦截；客户端 `npm run tauri dev` 启动带 worker 无 panic。**尚未做真机双端同步实测**（需两台机器登录同账号+同密钥）。
+  - **关键事实**：剪切板登录复用 `app_user`（同安卓 App），**不是** admin（sys_user）。
 - **当前状态**：所有已列功能均在 `npm run tauri dev` 下跑通；前端 `npm run build` 与后端 `cargo check` 全绿。
+- **下次从这里开始（云同步）**：① 真机双端同步实测（两台机填相同服务器+相同同步密钥，登录同一 app_user，看历史互相出现）；② 处理《5》里云同步 TODO（图片同步、跨机删除传播、密钥进 keychain）。
+
 - **最后完成**：新增「备用快捷键」（`shortcut2`）+ 修复「弹窗底部沉到 Dock 后面」（`position_at_cursor` 预留 Dock/菜单栏边距）；并**已打出最新签名 dmg**。
   产物：`src-tauri/target/release/bundle/dmg/clipboard-manager_0.1.0_aarch64.dmg`（签名 `Clipboard Manager Dev`）。
 - **打包注意**：① 先停 dev；② 卸载挂载的 dmg 卷要用 `hdiutil detach "/Volumes/clipboard-manager" -force 2>/dev/null || true`（**不要用 `/Volumes/clipboard*` glob**，zsh 无匹配会报错中断整条命令）。

@@ -1,5 +1,5 @@
 [package]
-name = "clipboard-manager"
+name = "shijinze-copy"
 version = "0.1.0"
 description = "A Tauri App"
 authors = ["you"]
@@ -22,6 +22,7 @@ tauri = { version = "2", features = ["tray-icon", "protocol-asset", "macos-priva
 tauri-plugin-opener = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-autostart = "2"
+tauri-plugin-dialog = "2"
 clipboard-rs = "0.2"
 enigo = "0.3"
 image = "0.25"
@@ -29,6 +30,14 @@ base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 window-vibrancy = "0.6"
+
+# 云同步（可选功能）：HTTP 客户端 + AES-256-GCM 端到端加密 + HMAC 去重指纹。
+# 全部只在独立同步线程里用，核心单机路径不依赖它们。
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
+aes-gcm = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
+rand = "0.8"
 
 # macOS 原生：读取前台应用名称/图标（来源 App）。objc2 版本须与
 # tauri/wry/window-vibrancy 一致（objc2 0.6 / app-kit 0.3 / foundation 0.3）。
