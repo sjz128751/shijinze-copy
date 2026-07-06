@@ -6,7 +6,7 @@ mod sync;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -40,6 +40,11 @@ fn clamp_image_thumb_height(n: u32) -> u32 {
     n.clamp(14, 48)
 }
 
+/// 主窗口背景不透明度合法化：夹到 [40, 100]（低于 40 太透看不清）。
+fn clamp_window_opacity(n: u8) -> u8 {
+    n.clamp(40, 100)
+}
+
 /// 单条文本最大字符数合法化：0 表示不限制；否则夹到 [1000, 10_000_000]。
 fn clamp_max_text_length(n: u32) -> u32 {
     if n == 0 {
@@ -69,6 +74,9 @@ struct Inner {
     icons: HashMap<String, String>,
     /// 窗口显示时记录的「前台来源 App」进程号；粘贴前据此把焦点还给它。
     prev_app_pid: Option<i32>,
+    /// 主窗口最近一次显示的时刻；用于失焦自动隐藏的「刚显示保护期」，
+    /// 避免 Windows 上 show 瞬间焦点抖动（未稳定拿到焦点）立刻触发 Focused(false) 把窗口秒隐（一闪而过）。
+    last_shown_at: Option<Instant>,
     /// 云同步的登录态与设备身份（独立于 Settings 持久化）。仅同步 worker 读写。
     sync_auth: sync::SyncAuth,
 }
@@ -1205,6 +1213,8 @@ fn set_settings(app: AppHandle, mut settings: Settings, state: State<'_, AppStat
     let resort_needed = old.history_size != settings.history_size
         || old.pinned_position != settings.pinned_position;
 
+    // 背景不透明度合法化（前端实时应用，无需后端动窗口）。
+    settings.window_opacity = clamp_window_opacity(settings.window_opacity);
     // 窗口高度合法化 + 若变化则实时调整主窗口尺寸（宽度保持固定）。
     settings.window_height = clamp_window_height(settings.window_height);
     if old.window_height != settings.window_height {
@@ -1535,12 +1545,13 @@ fn import_favorites(
 /// 前端据 window-shown 聚焦搜索框、清空搜索、选中第一项。
 fn show_main_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
-        // 在抢焦点之前，记下当前前台 App（粘贴时把焦点还给它）。
+        // 在抢焦点之前，记下当前前台 App（粘贴时把焦点还给它）；同时打「刚显示」时间戳。
         let pid = source_app::frontmost_pid();
-        if pid.is_some() {
-            if let Ok(mut inner) = app.state::<AppState>().0.lock() {
+        if let Ok(mut inner) = app.state::<AppState>().0.lock() {
+            if pid.is_some() {
                 inner.prev_app_pid = pid;
             }
+            inner.last_shown_at = Some(Instant::now());
         }
         let _ = win.show();
         // 弹窗位置：center=屏幕中心，否则(默认 cursor)跟随光标。
@@ -1935,15 +1946,23 @@ pub fn run() {
                 }
             }
             // 失焦 → 若 autoHideOnBlur 为真则隐藏。
+            // 但「刚显示保护期」内忽略：Windows 上 show 瞬间常先来一发 Focused(false)
+            // （窗口还没稳定拿到前台焦点），若立刻隐藏就会「一闪而过」。
             WindowEvent::Focused(false) => {
                 if window.label() == "main" {
                     if let Some(state) = window.app_handle().try_state::<AppState>() {
-                        let hide = state
+                        let (hide, just_shown) = state
                             .0
                             .lock()
-                            .map(|i| i.settings.auto_hide_on_blur)
-                            .unwrap_or(false);
-                        if hide {
+                            .map(|i| {
+                                let recent = i
+                                    .last_shown_at
+                                    .map(|t| t.elapsed() < Duration::from_millis(500))
+                                    .unwrap_or(false);
+                                (i.settings.auto_hide_on_blur, recent)
+                            })
+                            .unwrap_or((false, false));
+                        if hide && !just_shown {
                             let _ = window.hide();
                         }
                     }
@@ -2067,6 +2086,7 @@ pub fn run() {
                     settings: app_settings,
                     icons,
                     prev_app_pid: None,
+                    last_shown_at: None,
                     sync_auth,
                 }),
                 source_app::IconCache::new(),

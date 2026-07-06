@@ -51,8 +51,11 @@ body {
   flex-direction: column;
   height: 100vh;
   width: 100vw;
-  /* 跟随 apply_vibrancy 的圆角窗口，裁掉超出圆角的内容 */
-  background: transparent;
+  /* 窗口底色不透明度由「外观 → 背景不透明度」控制（--app-opacity，默认 100%）。
+     100% = 纯实心底色（盖住毛玻璃/亚克力，不透明）；越低越透出底层磨砂。
+     fallback: 不支持 color-mix 的旧内核用实心 var(--bg)，保证默认不透明。 */
+  background: var(--bg);
+  background: color-mix(in srgb, var(--bg) var(--app-opacity, 100%), transparent);
   border-radius: 12px;
   overflow: hidden;
 }
@@ -789,6 +792,10 @@ body.settings-window {
 .tab-panel.active {
   display: flex;
   flex-direction: column;
+  /* flex:0 0 auto 关键：本面板是 .settings-body(纵向 flex)的 item，且自身 overflow:hidden
+     会让 min-height:auto 解析为 0 → 内容超高时被压缩并裁掉下面的行、父容器反而不滚。
+     固定为内容高度（不收缩）才能撑开 .settings-body 出滚动条。 */
+  flex: 0 0 auto;
   background: var(--item-bg);
   border: 1px solid var(--border);
   border-radius: 12px;

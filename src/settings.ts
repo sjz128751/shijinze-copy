@@ -19,6 +19,7 @@ interface Settings {
   showNumbers: boolean;
   highlightMatch: "bold" | "underline" | "none";
   imageThumbHeight: number;
+  windowOpacity: number;
   syncEnabled: boolean;
   syncSelfHost: boolean;
   syncHost: string;
@@ -58,6 +59,7 @@ const DEFAULT_SETTINGS: Settings = {
   showNumbers: true,
   highlightMatch: "bold",
   imageThumbHeight: 18,
+  windowOpacity: 100,
   syncEnabled: false,
   syncSelfHost: false,
   syncHost: "",
@@ -91,6 +93,11 @@ function clampWindowHeight(n: number): number {
 function clampThumbHeight(n: number): number {
   if (!Number.isFinite(n)) return DEFAULT_SETTINGS.imageThumbHeight;
   return Math.min(48, Math.max(14, Math.round(n)));
+}
+
+function clampOpacity(n: number): number {
+  if (!Number.isFinite(n)) return DEFAULT_SETTINGS.windowOpacity;
+  return Math.min(100, Math.max(40, Math.round(n)));
 }
 
 function clampPort(n: number): number {
@@ -128,6 +135,8 @@ let winHeightRange: HTMLInputElement;
 let winHeightNum: HTMLInputElement;
 let thumbRange: HTMLInputElement;
 let thumbNum: HTMLInputElement;
+let opacityRange: HTMLInputElement;
+let opacityNum: HTMLInputElement;
 let maxTextInput: HTMLInputElement;
 let themeSeg: HTMLElement;
 let accentSwatches: HTMLElement;
@@ -260,6 +269,8 @@ function syncSettingsUI(): void {
   winHeightNum.value = String(settings.windowHeight);
   thumbRange.value = String(settings.imageThumbHeight);
   thumbNum.value = String(settings.imageThumbHeight);
+  opacityRange.value = String(settings.windowOpacity);
+  opacityNum.value = String(settings.windowOpacity);
   if (maxTextInput) maxTextInput.value = String(settings.maxTextLength);
   popupPositionSel.value = settings.popupPosition;
   pinnedPositionSel.value = settings.pinnedPosition;
@@ -312,6 +323,7 @@ function applySettings(next: Settings): void {
         ? next.highlightMatch
         : "bold",
     imageThumbHeight: clampThumbHeight(next.imageThumbHeight ?? DEFAULT_SETTINGS.imageThumbHeight),
+    windowOpacity: clampOpacity(next.windowOpacity ?? DEFAULT_SETTINGS.windowOpacity),
     syncEnabled: !!next.syncEnabled,
     syncSelfHost: !!next.syncSelfHost,
     syncHost: next.syncHost ?? DEFAULT_SETTINGS.syncHost,
@@ -571,6 +583,8 @@ async function init(): Promise<void> {
   winHeightNum = document.querySelector("#opt-winheight-num") as HTMLInputElement;
   thumbRange = document.querySelector("#opt-thumbheight") as HTMLInputElement;
   thumbNum = document.querySelector("#opt-thumbheight-num") as HTMLInputElement;
+  opacityRange = document.querySelector("#opt-opacity") as HTMLInputElement;
+  opacityNum = document.querySelector("#opt-opacity-num") as HTMLInputElement;
   maxTextInput = document.querySelector("#opt-maxtextlen") as HTMLInputElement;
   themeSeg = document.querySelector("#theme-seg") as HTMLElement;
   accentSwatches = document.querySelector("#accent-swatches") as HTMLElement;
@@ -722,6 +736,19 @@ async function init(): Promise<void> {
   });
   thumbRange.addEventListener("change", () => onThumbChange(Number(thumbRange.value)));
   thumbNum.addEventListener("change", () => onThumbChange(Number(thumbNum.value)));
+
+  const onOpacityChange = (raw: number) => {
+    const v = clampOpacity(raw);
+    settings = { ...settings, windowOpacity: v };
+    opacityRange.value = String(v);
+    opacityNum.value = String(v);
+    persistSettings();
+  };
+  opacityRange.addEventListener("input", () => {
+    opacityNum.value = opacityRange.value;
+  });
+  opacityRange.addEventListener("change", () => onOpacityChange(Number(opacityRange.value)));
+  opacityNum.addEventListener("change", () => onOpacityChange(Number(opacityNum.value)));
 
   // ----- 最大文字长度 -----
   maxTextInput.addEventListener("change", () => {

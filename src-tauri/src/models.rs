@@ -39,6 +39,11 @@ pub fn default_window_height() -> u32 {
     760
 }
 
+/// 主窗口背景不透明度（百分比 40..=100）。默认 100 = 完全不透明（不透出毛玻璃/亚克力）。
+pub fn default_window_opacity() -> u8 {
+    100
+}
+
 /// 弹窗位置：默认跟随光标。
 fn default_popup_position() -> String {
     "cursor".to_string()
@@ -168,6 +173,9 @@ pub struct Settings {
     /// 主窗口高度（px），默认 760，合理范围 360..=1400。
     #[serde(default = "default_window_height")]
     pub window_height: u32,
+    /// 主窗口背景不透明度（百分比 40..=100），默认 100=不透明。低于 100 时透出毛玻璃/亚克力磨砂。
+    #[serde(default = "default_window_opacity")]
+    pub window_opacity: u8,
     /// 弹窗位置："cursor"=光标处，"center"=屏幕中心，默认 "cursor"。
     #[serde(default = "default_popup_position")]
     pub popup_position: String,
@@ -232,6 +240,7 @@ impl Default for Settings {
             paste_on_select: true,
             ignore_concealed: false,
             window_height: default_window_height(),
+            window_opacity: default_window_opacity(),
             popup_position: default_popup_position(),
             pinned_position: default_pinned_position(),
             show_app_name: true,

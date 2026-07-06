@@ -41,6 +41,7 @@ interface Settings {
   showNumbers: boolean;
   highlightMatch: "bold" | "underline" | "none";
   imageThumbHeight: number;
+  windowOpacity: number;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -61,6 +62,7 @@ const DEFAULT_SETTINGS: Settings = {
   showNumbers: true,
   highlightMatch: "bold",
   imageThumbHeight: 18,
+  windowOpacity: 100,
 };
 
 let items: ClipItem[] = [];
@@ -1119,6 +1121,9 @@ function applyTheme(): void {
 function applyAppearance(): void {
   const root = document.documentElement;
   root.style.setProperty("--thumb-h", `${settings.imageThumbHeight}px`);
+  // 背景不透明度：100=实心不透明，越低越透出毛玻璃/亚克力（见 .app 的 color-mix）。
+  const op = Math.min(100, Math.max(40, settings.windowOpacity || 100));
+  root.style.setProperty("--app-opacity", `${op}%`);
   if (appTitleEl) appTitleEl.hidden = !settings.showAppName;
 }
 
